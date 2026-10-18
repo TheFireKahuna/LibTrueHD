@@ -29,7 +29,7 @@
 #include "truehd_atmos.h"
 
 _Static_assert(sizeof(TrueHDAtmosElement) == 64, "element layout");
-_Static_assert(sizeof(TrueHDAtmosBlock) == 88, "block layout");
+_Static_assert(sizeof(TrueHDAtmosBlock) == 112, "block layout");
 _Static_assert(sizeof(TrueHDAtmosStreamInfo) == 148, "stream info layout");
 
 /* ---------------------------------------------------------------------------------------- */
@@ -172,7 +172,7 @@ static int load_caf(const char *path, Reference *ref) {
 }
 
 typedef struct {
-    uint64_t compared_frames, mismatched_samples, blocks_checked;
+    uint64_t compared_frames, mismatched_samples, blocks_checked, wrapped_samples;
     int64_t max_abs_diff;
 } Compare;
 
@@ -188,8 +188,13 @@ static void compare_block(const Reference *ref, const TrueHDAtmosBlock *b, uint6
         for (uint32_t i = 0; i < b->frame_count; i++) {
             int32_t ours = (int32_t)lrintf(plane[i] * 8388608.0f);
             int32_t theirs = ref->samples[(at + i) * ref->channels + ch];
+            /* truehdd writes 24-bit PCM and keeps the low 24 bits of a sample beyond that range;
+               the library returns it unclipped. Such a sample matches if its low 24 bits do. */
+            int32_t wrapped = (int32_t)((uint32_t)ours << 8) >> 8;
+            bool beyond = wrapped != ours;
+            if (beyond) c->wrapped_samples++;
             /* Also require the float to be exactly representable back (no rounding happened). */
-            if (ours != theirs || (float)theirs / 8388608.0f != plane[i]) {
+            if (wrapped != theirs || (!beyond && (float)theirs / 8388608.0f != plane[i])) {
                 c->mismatched_samples++;
                 int64_t d = llabs((int64_t)ours - theirs);
                 if (d > c->max_abs_diff) c->max_abs_diff = d;
@@ -556,9 +561,9 @@ int main(int argc, char **argv) {
     if (ref.samples) {
         bool ok = cmp.mismatched_samples == 0 && cmp.compared_frames == ref.frames;
         printf("PCM vs truehdd: %s - %" PRIu64 "/%" PRIu64 " frames compared, %" PRIu64
-               " mismatched samples (max |diff| %" PRId64 ")\n",
+               " mismatched samples (max |diff| %" PRId64 "), %" PRIu64 " beyond 24 bits\n",
                ok ? "BIT-EXACT" : "MISMATCH", cmp.compared_frames, ref.frames, cmp.mismatched_samples,
-               cmp.max_abs_diff);
+               cmp.max_abs_diff, cmp.wrapped_samples);
         if (!ok) failed = true;
     }
 

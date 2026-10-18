@@ -69,9 +69,16 @@ git -C "$ROOT/truehdd" cat-file -e "$TRUEHDD_REV^{commit}" 2>/dev/null ||
     git -C "$ROOT/truehdd" fetch --quiet "$TRUEHDD_URL" "$TRUEHDD_REV"
 git -C "$ROOT/truehdd" checkout --quiet "$TRUEHDD_REV"
 TRUEHDD="$ROOT/truehdd/$CLI_TARGET/release/truehdd"
-if [ ! -x "$TRUEHDD" ]; then
-    echo "==> Building the truehdd CLI ${CLI_FLAGS[*]:-}"
-    (cd "$ROOT/truehdd" && cargo build --release --locked --target-dir "$CLI_TARGET" ${CLI_FLAGS[@]+"${CLI_FLAGS[@]}"})
+# Always through cargo, which rebuilds only what changed: a binary left from another commit or
+# feature set would otherwise decode the references.
+echo "==> Building the truehdd CLI ${CLI_FLAGS[*]:-}"
+(cd "$ROOT/truehdd" && cargo build --release --locked --target-dir "$CLI_TARGET" ${CLI_FLAGS[@]+"${CLI_FLAGS[@]}"})
+# References are reused across runs, so they are tied to the CLI that made them.
+STAMP="$TRUEHDD_REV ${CLI_FLAGS[*]:-}"
+if [ "$(cat "$REF/.made-by" 2>/dev/null)" != "$STAMP" ]; then
+    rm -rf "$REF"
+    mkdir -p "$REF/fixtures"
+    printf '%s\n' "$STAMP" >"$REF/.made-by"
 fi
 reference() { # <output base> <truehdd decode args...>
     local base="$1"
