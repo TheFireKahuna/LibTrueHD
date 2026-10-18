@@ -21,7 +21,15 @@ crate-type = ["staticlib", "rlib"]
 # decode time than #42 alone; back to upstream once it is merged. On top of it: the parser
 # option that discards matrix interpolation values (feat/ignore-interpolation).
 # LOCAL file:// source until that branch is pushed to the fork.
-truehd = { git = "file:///Users/vincentherbst/Dev/truehdd", rev = "ab12a6dbd761d506f079ea9a0e95240bc3b83f9e", default-features = false }
+truehd = { git = "file:///Users/vincentherbst/Dev/truehdd", rev = "07bc0ac675df4aa7f22458a26cf0c65f3a5cc14c", default-features = false }
+
+[features]
+# Off by default: the library then reads a stream's matrix interpolation values and discards them,
+# and the interpolating decode is not compiled in. Object presentations of streams that interpolate
+# no longer decode bit-exactly; channel-based presentations carry no interpolation and are exact
+# either way. On for measurement builds that need the exact decode (build.sh and verify.sh take
+# TRUEHD_ATMOS_FEATURES=matrix-interpolation).
+matrix-interpolation = ["truehd/matrix-interpolation"]
 
 [profile.release]
 opt-level = 3

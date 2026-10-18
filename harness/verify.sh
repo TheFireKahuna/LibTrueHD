@@ -22,7 +22,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CRATE="$(dirname "$HERE")"
 ROOT="${TRUEHD_ATMOS_WORK:-$CRATE/.work}"
 SAMPLES="$ROOT/samples"
-REF="$ROOT/ref"
+# A library built without `matrix-interpolation` (the default) is checked against truehdd built the
+# same way, so the references and the reference CLI are kept apart per build.
+case "${TRUEHD_ATMOS_FEATURES:-}" in
+*matrix-interpolation*) REF="$ROOT/ref"; CLI_FLAGS=(); CLI_TARGET=target ;;
+*) REF="$ROOT/ref-nointerp"; CLI_FLAGS=(--no-default-features); CLI_TARGET=target-nointerp ;;
+esac
 XCFW="$CRATE/TrueHD.xcframework"
 OUT="$CRATE/build/verify"
 ASSETS="$ROOT/truehdd/truehd/tests/assets"
@@ -63,10 +68,10 @@ fi
 git -C "$ROOT/truehdd" cat-file -e "$TRUEHDD_REV^{commit}" 2>/dev/null ||
     git -C "$ROOT/truehdd" fetch --quiet "$TRUEHDD_URL" "$TRUEHDD_REV"
 git -C "$ROOT/truehdd" checkout --quiet "$TRUEHDD_REV"
-TRUEHDD="$ROOT/truehdd/target/release/truehdd"
+TRUEHDD="$ROOT/truehdd/$CLI_TARGET/release/truehdd"
 if [ ! -x "$TRUEHDD" ]; then
-    echo "==> Building the truehdd CLI"
-    (cd "$ROOT/truehdd" && cargo build --release --locked)
+    echo "==> Building the truehdd CLI ${CLI_FLAGS[*]:-}"
+    (cd "$ROOT/truehdd" && cargo build --release --locked --target-dir "$CLI_TARGET" ${CLI_FLAGS[@]+"${CLI_FLAGS[@]}"})
 fi
 reference() { # <output base> <truehdd decode args...>
     local base="$1"

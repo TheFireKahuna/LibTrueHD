@@ -5,7 +5,7 @@ This product includes software from the truehdd project
 (https://github.com/truehdd/truehdd): the `truehd` crate (TrueHD/MLP parser and decoder),
 Copyright Rainbaby and the truehdd contributors, licensed under the Apache License, Version 2.0.
 It is built from https://github.com/superuser404notfound/truehdd, commit
-ab12a6dbd761d506f079ea9a0e95240bc3b83f9e: upstream commit
+07bc0ac675df4aa7f22458a26cf0c65f3a5cc14c: upstream commit
 02d29cd0 with performance changes by harletty (https://github.com/harletty/truehdd,
 branch fix/huffman-tree-build-memory), which include the change submitted upstream as
 truehdd/truehdd#42, and a parser option that discards matrix interpolation values.

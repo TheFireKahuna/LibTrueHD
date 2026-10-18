@@ -70,12 +70,14 @@ impl Decoder {
                 OK => {
                     assert!(b.frame_count > 0 && b.frame_count <= 160);
                     assert!(b.channel_count > 0 && b.channel_count <= 16);
-                    // Every plane must be readable for frame_count samples in [-1, 1).
+                    // Every plane must be readable for frame_count samples, in [-1, 1) where the
+                    // decode is exact (without interpolation an object presentation may exceed it).
+                    let exact = cfg!(feature = "matrix-interpolation") || b.presentation < 3;
                     for c in 0..b.channel_count as usize {
                         let plane = unsafe {
                             std::slice::from_raw_parts(*b.channels.add(c), b.frame_count as usize)
                         };
-                        assert!(plane.iter().all(|v| (-1.0..1.0).contains(v)));
+                        assert!(plane.iter().all(|v| v.is_finite() && (!exact || (-1.0..1.0).contains(v))));
                     }
                     out.push((b.presentation, b.channel_count, b.flags, b.layout_serial));
                 }
@@ -484,8 +486,8 @@ fn bed_companion_is_empty_without_an_object_presentation() {
     assert!(blocks.iter().all(|b| b.2.is_empty() && b.3.is_empty()));
 }
 
-/// Discarding interpolation changes an interpolating object presentation, survives reset(),
-/// and is per handle.
+/// Discarding interpolation changes an interpolating object presentation (in a build with the
+/// `matrix-interpolation` feature), survives reset(), and is per handle.
 #[test]
 fn ignore_interpolation_is_per_handle_and_survives_reset() {
     let Some(data) = sample("dolby-unfold.thd") else {
@@ -502,10 +504,12 @@ fn ignore_interpolation_is_per_handle_and_survives_reset() {
     let b = feed(&held, &data);
     assert!(!a.is_empty());
     assert_eq!(a.len(), b.len());
-    assert!(
-        a.iter().zip(&b).any(|(x, y)| x.0 != y.0),
-        "no block changed"
-    );
+    if cfg!(feature = "matrix-interpolation") {
+        assert!(a.iter().zip(&b).any(|(x, y)| x.0 != y.0), "no block changed");
+    } else {
+        // Without the feature no handle interpolates.
+        assert!(a.iter().zip(&b).all(|(x, y)| x.0 == y.0));
+    }
     assert_eq!(unsafe { truehd_atmos_decoder_reset(held.0) }, OK);
     assert_eq!(
         feed(&held, &data).iter().map(|x| &x.0).collect::<Vec<_>>(),
