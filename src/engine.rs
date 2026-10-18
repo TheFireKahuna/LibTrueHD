@@ -41,6 +41,9 @@ struct Roles {
 
 pub struct Engine {
     selection: i32,
+    /// Also decode the highest channel-based presentation alongside an object presentation.
+    bed_companion: bool,
+    bed_resolved: Option<usize>,
     framer: Framer,
     parser: Box<Parser>,
     decoder: Box<Decoder>,
@@ -68,6 +71,9 @@ pub struct Engine {
     planes: Box<[[f32; MAX_BLOCK_FRAMES]; MAX_CHANNELS]>,
     plane_ptrs: [*const f32; MAX_CHANNELS],
     speakers: [u8; MAX_CHANNELS],
+    bed_planes: Box<[[f32; MAX_BLOCK_FRAMES]; MAX_CHANNELS]>,
+    bed_plane_ptrs: [*const f32; MAX_CHANNELS],
+    bed_speakers: [u8; MAX_CHANNELS],
     objects: ObjectState,
     oamd_bytes: Vec<(u64, Vec<u8>)>,
 
@@ -80,6 +86,8 @@ impl Engine {
     pub fn new(selection: i32) -> Box<Self> {
         let mut engine = Box::new(Self {
             selection,
+            bed_companion: false,
+            bed_resolved: None,
             framer: Framer::default(),
             parser: Box::new(Parser::default()),
             decoder: Box::new(Decoder::default()),
@@ -102,6 +110,9 @@ impl Engine {
             planes: Box::new([[0.0; MAX_BLOCK_FRAMES]; MAX_CHANNELS]),
             plane_ptrs: [std::ptr::null(); MAX_CHANNELS],
             speakers: [SPEAKER_UNKNOWN; MAX_CHANNELS],
+            bed_planes: Box::new([[0.0; MAX_BLOCK_FRAMES]; MAX_CHANNELS]),
+            bed_plane_ptrs: [std::ptr::null(); MAX_CHANNELS],
+            bed_speakers: [SPEAKER_UNKNOWN; MAX_CHANNELS],
             objects: ObjectState::default(),
             oamd_bytes: Vec::with_capacity(4),
             stats: Stats::default(),
@@ -110,6 +121,9 @@ impl Engine {
         });
         engine.parser.set_check_fifo(false);
         for (ptr, plane) in engine.plane_ptrs.iter_mut().zip(engine.planes.iter()) {
+            *ptr = plane.as_ptr();
+        }
+        for (ptr, plane) in engine.bed_plane_ptrs.iter_mut().zip(engine.bed_planes.iter()) {
             *ptr = plane.as_ptr();
         }
         engine
@@ -139,6 +153,23 @@ impl Engine {
         self.selection = selection;
         self.sync_signature.clear(); // re-resolve at the next major sync
         self.restart_decoding();
+    }
+
+    /// Bed companion: with an object presentation selected, every block also carries the
+    /// stream's highest channel-based presentation, decoded from the same access unit.
+    /// Applies from the next major sync, like a presentation switch.
+    pub fn set_bed_companion(&mut self, on: bool) {
+        if self.bed_companion == on {
+            return;
+        }
+        self.bed_companion = on;
+        self.sync_signature.clear();
+        self.restart_decoding();
+    }
+
+    /// Discard matrix interpolation values from now on; see the header.
+    pub fn set_ignore_interpolation(&mut self, ignore: bool) {
+        self.parser.set_ignore_interpolation(ignore);
     }
 
     fn restart_decoding(&mut self) {
@@ -247,7 +278,7 @@ impl Engine {
                     continue;
                 }
                 Ok(None) => continue,
-                Ok(Some((decoded, index))) => {
+                Ok(Some((decoded, index, bed))) => {
                     self.waiting_for_sync = false;
                     self.stats.access_units_decoded += 1;
                     if decoded.is_duplicate {
@@ -256,7 +287,7 @@ impl Engine {
                         self.stats.duplicate_access_units += 1;
                         continue;
                     }
-                    self.emit(&decoded, index, &info, pts, pts_au_index, out);
+                    self.emit(&decoded, index, bed.as_ref(), &info, (pts, pts_au_index), out);
                     return OK;
                 }
             }
@@ -293,11 +324,12 @@ impl Engine {
             Err(message) => {
                 // Still decodable with the selector alone; the probe retries next major sync.
                 self.set_error(message);
-                self.apply_required(fallback_resolution(self.selection));
+                self.apply_required(fallback_resolution(self.selection), None);
                 return true;
             }
         };
         let resolved = stream::resolve(self.selection, &desc.map);
+        let bed = stream::resolve(PRESENTATION_HIGHEST_CHANNEL_BASED, &desc.map);
         let configured_before = !self.sync_signature.is_empty();
         std::mem::swap(&mut self.sync_signature, &mut self.signature_scratch);
         self.desc = Some(desc);
@@ -305,20 +337,28 @@ impl Engine {
             // A configuration change mid-stream: start the new one cleanly at this access unit.
             self.restart_decoding();
         }
-        self.apply_required(resolved);
+        let bed = (self.bed_companion && resolved == 3 && bed != resolved).then_some(bed);
+        self.apply_required(resolved, bed);
         true
     }
 
-    fn apply_required(&mut self, resolved: usize) {
+    fn apply_required(&mut self, resolved: usize, bed: Option<usize>) {
         self.resolved = resolved;
+        self.bed_resolved = bed;
         self.required = [false; MAX_PRESENTATIONS];
         self.required[resolved] = true;
+        if let Some(bed) = bed {
+            self.required[bed] = true;
+        }
         self.parser.set_required_presentations(&self.required);
     }
 
     /// Parses and decodes one access unit. `Ok(None)` for an access unit skipped while waiting
     /// for a major sync.
-    fn decode(&mut self, frame: &Frame) -> Result<Option<(DecodedAccessUnit, usize)>, String> {
+    fn decode(
+        &mut self,
+        frame: &Frame,
+    ) -> Result<Option<(DecodedAccessUnit, usize, Option<DecodedAccessUnit>)>, String> {
         if self.waiting_for_sync && !frame.is_major_sync() {
             self.stats.access_units_skipped += 1;
             return Ok(None);
@@ -353,21 +393,22 @@ impl Engine {
         .map_err(|p| format!("decoder panicked: {}", panic_message(&p)))?
         .map_err(|e| format!("decode error: {e:#}"))?;
 
-        let found = decoded
+        let bed = self.bed_resolved.and_then(|i| decoded[i].take());
+        let (main, index) = decoded
             .iter_mut()
             .enumerate()
             .find_map(|(i, slot)| slot.take().map(|d| (d, i)))
             .ok_or_else(|| "decoder produced no presentation".to_string())?;
-        Ok(Some(found))
+        Ok(Some((main, index, bed)))
     }
 
     fn emit(
         &mut self,
         decoded: &DecodedAccessUnit,
         presentation: usize,
+        bed: Option<&DecodedAccessUnit>,
         info: &AuInfo,
-        pts: i64,
-        pts_au_index: u32,
+        (pts, pts_au_index): (i64, u32),
         out: &mut Block,
     ) {
         let frames = decoded.sample_length.min(MAX_BLOCK_FRAMES);
@@ -378,6 +419,20 @@ impl Engine {
                 *dst = row[c] as f32 * PCM_SCALE;
             }
         }
+
+        let bed_channels = match bed {
+            Some(bed) if bed.sample_length.min(MAX_BLOCK_FRAMES) == frames => {
+                let n = bed.channel_count.min(MAX_CHANNELS);
+                for (c, plane) in self.bed_planes.iter_mut().enumerate().take(n) {
+                    for (dst, row) in plane.iter_mut().zip(bed.pcm_data.iter()).take(frames) {
+                        *dst = row[c] as f32 * PCM_SCALE;
+                    }
+                }
+                self.bed_speakers = stream::roles(&bed.channel_labels, n, false);
+                n
+            }
+            _ => 0,
+        };
 
         // Channel roles from the major sync; for an object presentation the bed labels come
         // first and the remaining channels are objects.
@@ -471,6 +526,17 @@ impl Engine {
             channels: self.plane_ptrs.as_ptr(),
             speakers: self.speakers.as_ptr(),
             metadata: block_metadata.metadata,
+            bed_channel_count: bed_channels as u32,
+            bed_channels: if bed_channels > 0 {
+                self.bed_plane_ptrs.as_ptr()
+            } else {
+                std::ptr::null()
+            },
+            bed_speakers: if bed_channels > 0 {
+                self.bed_speakers.as_ptr()
+            } else {
+                std::ptr::null()
+            },
         };
 
         self.sample_position += frames as u64;

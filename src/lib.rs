@@ -167,6 +167,32 @@ pub unsafe extern "C" fn truehd_atmos_decoder_set_presentation(
 }
 
 /// # Safety
+/// `decoder` is NULL or a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn truehd_atmos_decoder_set_bed_companion(
+    decoder: *mut TrueHDAtmosDecoder,
+    enabled: bool,
+) -> Status {
+    with_engine(decoder, false, |engine| {
+        engine.set_bed_companion(enabled);
+        OK
+    })
+}
+
+/// # Safety
+/// `decoder` is NULL or a live handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn truehd_atmos_decoder_set_ignore_interpolation(
+    decoder: *mut TrueHDAtmosDecoder,
+    ignore: bool,
+) -> Status {
+    with_engine(decoder, false, |engine| {
+        engine.set_ignore_interpolation(ignore);
+        OK
+    })
+}
+
+/// # Safety
 /// `decoder` is NULL or a live handle; `data` points to `size` readable bytes (or `size` is 0).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn truehd_atmos_decoder_push(

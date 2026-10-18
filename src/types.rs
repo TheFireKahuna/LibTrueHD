@@ -3,7 +3,7 @@
 
 use std::mem::{offset_of, size_of};
 
-pub const API_VERSION: u32 = 1;
+pub const API_VERSION: u32 = 2;
 pub const MAX_CHANNELS: usize = 16;
 pub const MAX_BLOCK_FRAMES: usize = 160;
 pub const NO_PTS: i64 = i64::MIN;
@@ -146,6 +146,9 @@ pub struct Block {
     pub channels: *const *const f32,
     pub speakers: *const u8,
     pub metadata: *const Metadata,
+    pub bed_channel_count: u32,
+    pub bed_channels: *const *const f32,
+    pub bed_speakers: *const u8,
 }
 
 #[repr(C)]
@@ -210,12 +213,15 @@ const _: () = {
     assert!(size_of::<MetadataUpdate>() == 16);
     assert!(size_of::<Metadata>() == 40);
     assert!(offset_of!(Metadata, updates) == 24);
-    assert!(size_of::<Block>() == 88);
+    assert!(size_of::<Block>() == 112);
     assert!(offset_of!(Block, pts) == 24);
     assert!(offset_of!(Block, layout_serial) == 36);
     assert!(offset_of!(Block, input_frame_offset) == 56);
     assert!(offset_of!(Block, channels) == 64);
     assert!(offset_of!(Block, metadata) == 80);
+    assert!(offset_of!(Block, bed_channel_count) == 88);
+    assert!(offset_of!(Block, bed_channels) == 96);
+    assert!(offset_of!(Block, bed_speakers) == 104);
     assert!(size_of::<PresentationInfo>() == 28);
     assert!(size_of::<StreamInfo>() == 36 + 4 * 28);
     assert!(size_of::<Stats>() == 12 * 8);

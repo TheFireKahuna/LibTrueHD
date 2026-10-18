@@ -41,6 +41,9 @@ fn empty_block() -> Block {
         channels: ptr::null(),
         speakers: ptr::null(),
         metadata: ptr::null(),
+        bed_channel_count: 0,
+        bed_channels: ptr::null(),
+        bed_speakers: ptr::null(),
     }
 }
 
@@ -376,5 +379,136 @@ fn version_string_names_the_commit_notice_names() {
         notice.split_whitespace().any(|word| word.trim_end_matches(&[':', ',', '.'][..]).len() == 40
             && word.starts_with(commit)),
         "NOTICE does not name the truehdd commit in {version:?}"
+    );
+}
+
+/// Every plane and speaker code of every block: (main planes, main speakers, bed planes, bed speakers).
+type Decoded = (Vec<Vec<f32>>, Vec<u8>, Vec<Vec<f32>>, Vec<u8>);
+
+fn decode_all(d: &Decoder) -> Vec<Decoded> {
+    let planes = |ptrs: *const *const f32, n: u32, frames: u32| -> Vec<Vec<f32>> {
+        (0..n as usize)
+            .map(|c| unsafe { std::slice::from_raw_parts(*ptrs.add(c), frames as usize).to_vec() })
+            .collect()
+    };
+    let codes = |p: *const u8, n: u32| -> Vec<u8> {
+        if n == 0 {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(p, n as usize).to_vec() }
+        }
+    };
+    let mut out = Vec::new();
+    loop {
+        let mut b = empty_block();
+        match unsafe { truehd_atmos_decoder_pull(d.0, &mut b) } {
+            OK => out.push((
+                planes(b.channels, b.channel_count, b.frame_count),
+                codes(b.speakers, b.channel_count),
+                planes(b.bed_channels, b.bed_channel_count, b.frame_count),
+                codes(b.bed_speakers, b.bed_channel_count),
+            )),
+            NEED_MORE_DATA => return out,
+            other => panic!("pull returned {other}"),
+        }
+    }
+}
+
+/// Pushes `data` in pieces small enough for the input limit, pulling everything after each.
+fn feed(d: &Decoder, data: &[u8]) -> Vec<Decoded> {
+    let mut out = Vec::new();
+    for chunk in data.chunks(1 << 20) {
+        assert_eq!(d.push(chunk, 0), OK);
+        out.extend(decode_all(d));
+    }
+    out
+}
+
+fn atmos_fixtures() -> Vec<(String, Vec<u8>)> {
+    let mut v: Vec<(String, Vec<u8>)> = [
+        "fba_atmos_cbi.mlp",
+        "fba_atmos_dimtrim.mlp",
+        "fba_atmos_obj.mlp",
+    ]
+    .iter()
+    .map(|n| (n.to_string(), asset(n)))
+    .collect();
+    if let Some(data) = sample("dolby-unfold.thd") {
+        v.push(("dolby-unfold.thd".into(), data));
+    }
+    v
+}
+
+/// The bed companion is the highest channel-based presentation, sample for sample, and leaves
+/// the object presentation untouched.
+#[test]
+fn bed_companion_matches_a_channel_based_decode() {
+    for (name, data) in atmos_fixtures() {
+        let plain = feed(&Decoder::new(PRESENTATION_HIGHEST), &data);
+        let bed = feed(&Decoder::new(PRESENTATION_HIGHEST_CHANNEL_BASED), &data);
+        let companion = Decoder::new(PRESENTATION_HIGHEST);
+        assert_eq!(
+            unsafe { truehd_atmos_decoder_set_bed_companion(companion.0, true) },
+            OK
+        );
+        let both = feed(&companion, &data);
+        assert!(!both.is_empty(), "{name}: no output");
+        assert_eq!(both.len(), plain.len(), "{name}: block count");
+        assert_eq!(
+            both.len(),
+            bed.len(),
+            "{name}: block count against the bed decode"
+        );
+        for (i, ((b, p), c)) in both.iter().zip(&plain).zip(&bed).enumerate() {
+            assert!(p.2.is_empty(), "{name}: bed planes without the companion");
+            assert_eq!(b.0, p.0, "{name} block {i}: object planes changed");
+            assert_eq!(b.1, p.1, "{name} block {i}: object speakers changed");
+            assert_eq!(b.2, c.0, "{name} block {i}: bed planes");
+            assert_eq!(b.3, c.1, "{name} block {i}: bed speakers");
+        }
+    }
+}
+
+/// A channel-based selection has no companion to carry.
+#[test]
+fn bed_companion_is_empty_without_an_object_presentation() {
+    let data = asset("fba_atmos_obj.mlp");
+    let d = Decoder::new(PRESENTATION_HIGHEST_CHANNEL_BASED);
+    assert_eq!(
+        unsafe { truehd_atmos_decoder_set_bed_companion(d.0, true) },
+        OK
+    );
+    d.push(&data, 0);
+    let blocks = decode_all(&d);
+    assert!(!blocks.is_empty());
+    assert!(blocks.iter().all(|b| b.2.is_empty() && b.3.is_empty()));
+}
+
+/// Discarding interpolation changes an interpolating object presentation, survives reset(),
+/// and is per handle.
+#[test]
+fn ignore_interpolation_is_per_handle_and_survives_reset() {
+    let Some(data) = sample("dolby-unfold.thd") else {
+        eprintln!("skipped: dolby-unfold.thd not in the work directory");
+        return;
+    };
+    let exact = Decoder::new(PRESENTATION_HIGHEST);
+    let held = Decoder::new(PRESENTATION_HIGHEST);
+    assert_eq!(
+        unsafe { truehd_atmos_decoder_set_ignore_interpolation(held.0, true) },
+        OK
+    );
+    let a = feed(&exact, &data);
+    let b = feed(&held, &data);
+    assert!(!a.is_empty());
+    assert_eq!(a.len(), b.len());
+    assert!(
+        a.iter().zip(&b).any(|(x, y)| x.0 != y.0),
+        "no block changed"
+    );
+    assert_eq!(unsafe { truehd_atmos_decoder_reset(held.0) }, OK);
+    assert_eq!(
+        feed(&held, &data).iter().map(|x| &x.0).collect::<Vec<_>>(),
+        b.iter().map(|x| &x.0).collect::<Vec<_>>()
     );
 }

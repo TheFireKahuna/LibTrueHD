@@ -51,6 +51,16 @@ while truehd_atmos_decoder_pull(decoder, &block) == TRUEHD_ATMOS_OK {
 truehd_atmos_decoder_reset(decoder)
 ```
 
+Two per-handle options, both off after `create()` and kept across `reset()`:
+
+- `truehd_atmos_decoder_set_bed_companion(decoder, true)`: with the object presentation
+  selected, every block also carries the stream's highest channel-based presentation (the 7.1
+  or 5.1 bed) in `block.bed_channels` / `block.bed_speakers`, decoded from the same access
+  unit, so the two are sample-aligned without a second decoder.
+- `truehd_atmos_decoder_set_ignore_interpolation(decoder, true)`: matrix interpolation values
+  are read and discarded, so each matrix holds its last transmitted coefficients until the next
+  update. Not bit-exact on streams that interpolate.
+
 [`include/truehd_atmos.h`](include/truehd_atmos.h) is the reference: ownership, threading,
 coordinates (OAMD room coordinates, x left→right, y front→back, z floor −1 / ear level 0 /
 ceiling +1), the input timeline, presentation selection and every metadata field are documented

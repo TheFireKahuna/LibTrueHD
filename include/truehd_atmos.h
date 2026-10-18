@@ -41,6 +41,7 @@
 #define TRUEHD_ATMOS_H
 
 #include <stddef.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -53,7 +54,7 @@ extern "C" {
  * comparable without conversions.
  */
 
-#define TRUEHD_ATMOS_API_VERSION 1u
+#define TRUEHD_ATMOS_API_VERSION 2u
 
 /** Most channels (elements) any presentation can carry. */
 #define TRUEHD_ATMOS_MAX_CHANNELS 16u
@@ -320,6 +321,10 @@ typedef struct TrueHDAtmosBlock {
                                      normalised to [-1, 1): value = pcm24 / 8388608 exactly */
     const uint8_t *speakers;      /* channel_count TRUEHD_ATMOS_SPEAKER_* codes */
     const TrueHDAtmosMetadata *metadata; /* see TRUEHD_ATMOS_BLOCK_HAS_METADATA, else NULL */
+    uint32_t bed_channel_count;   /* see truehd_atmos_decoder_set_bed_companion(), else 0 */
+    const float *const *bed_channels; /* bed_channel_count planes of frame_count floats, as
+                                     .channels; NULL when bed_channel_count is 0 */
+    const uint8_t *bed_speakers;  /* bed_channel_count TRUEHD_ATMOS_SPEAKER_* codes, or NULL */
 } TrueHDAtmosBlock;
 
 /* ------------------------------------------------------------------------------------------ */
@@ -418,6 +423,27 @@ TrueHDAtmosStatus truehd_atmos_decoder_reset(TrueHDAtmosDecoder *decoder);
  */
 TrueHDAtmosStatus truehd_atmos_decoder_set_presentation(TrueHDAtmosDecoder *decoder,
                                                         int32_t presentation);
+
+/**
+ * Bed companion. When enabled and the presentation decoded is the object presentation (3),
+ * every block also carries the stream's highest channel-based presentation (7.1, 5.1 or
+ * stereo, whichever the stream has) in .bed_channels / .bed_speakers, decoded from the same
+ * access unit, so it is sample-aligned with .channels. Otherwise .bed_channel_count is 0.
+ * Off after create(). Takes effect like set_presentation(): decoding restarts at the next
+ * major sync. reset() keeps the setting.
+ */
+TrueHDAtmosStatus truehd_atmos_decoder_set_bed_companion(TrueHDAtmosDecoder *decoder,
+                                                         bool enabled);
+
+/**
+ * When enabled, the matrix interpolation values a stream carries are read and discarded:
+ * every primitive matrix holds the coefficients last transmitted until the next update. The
+ * decode is then no longer bit-exact on a stream that interpolates (object presentations
+ * typically do). Off after create(). Applies to the access units parsed from the next call on;
+ * reset() keeps the setting.
+ */
+TrueHDAtmosStatus truehd_atmos_decoder_set_ignore_interpolation(TrueHDAtmosDecoder *decoder,
+                                                                bool ignore);
 
 /**
  * Appends `size` bytes of TrueHD bitstream. `pts` is an arbitrary caller timestamp (for
