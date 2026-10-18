@@ -19,9 +19,8 @@ crate-type = ["staticlib", "rlib"]
 # the change from truehdd/truehdd#42 among them): blocks decoded in place, table-driven Huffman,
 # vectorised prediction filters, whole-block matrices. Byte-identical output, about a third less
 # decode time than #42 alone; back to upstream once it is merged. On top of it: the parser
-# option that discards matrix interpolation values (feat/ignore-interpolation).
-# LOCAL file:// source until that branch is pushed to the fork.
-truehd = { git = "file:///Users/vincentherbst/Dev/truehdd", rev = "07bc0ac675df4aa7f22458a26cf0c65f3a5cc14c", default-features = false }
+# option and feature that discard matrix interpolation values (branch feat/ignore-interpolation).
+truehd = { git = "https://github.com/superuser404notfound/truehdd", rev = "07bc0ac675df4aa7f22458a26cf0c65f3a5cc14c", default-features = false }
 
 [features]
 # Off by default: the library then reads a stream's matrix interpolation values and discards them,
