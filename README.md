@@ -26,7 +26,7 @@ the old product name.
 ## Use
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/LibTrueHD", .upToNextMinor(from: "3.0.0")),
+.package(url: "https://github.com/superuser404notfound/LibTrueHD", .upToNextMinor(from: "3.1.0")),
 // target dependency:
 .product(name: "TrueHD", package: "LibTrueHD"),
 ```
