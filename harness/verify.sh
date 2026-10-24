@@ -22,12 +22,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CRATE="$(dirname "$HERE")"
 ROOT="${TRUEHD_ATMOS_WORK:-$CRATE/.work}"
 SAMPLES="$ROOT/samples"
-# A library built without `matrix-interpolation` (the default) is checked against truehdd built the
-# same way, so the references and the reference CLI are kept apart per build.
-case "${TRUEHD_ATMOS_FEATURES:-}" in
-*matrix-interpolation*) REF="$ROOT/ref"; CLI_FLAGS=(); CLI_TARGET=target ;;
-*) REF="$ROOT/ref-nointerp"; CLI_FLAGS=(--no-default-features); CLI_TARGET=target-nointerp ;;
-esac
+# A library built without `matrix-interpolation` (TRUEHD_ATMOS_NO_INTERPOLATION=1) is checked
+# against truehdd built the same way, so the references and the reference CLI are kept apart per build.
+if [ -n "${TRUEHD_ATMOS_NO_INTERPOLATION:-}" ]; then
+    REF="$ROOT/ref-nointerp"; CLI_FLAGS=(--no-default-features); CLI_TARGET=target-nointerp
+else
+    REF="$ROOT/ref"; CLI_FLAGS=(); CLI_TARGET=target
+fi
 XCFW="$CRATE/TrueHD.xcframework"
 OUT="$CRATE/build/verify"
 ASSETS="$ROOT/truehdd/truehd/tests/assets"

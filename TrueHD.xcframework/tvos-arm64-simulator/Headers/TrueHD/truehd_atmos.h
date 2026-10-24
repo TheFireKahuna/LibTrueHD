@@ -319,9 +319,9 @@ typedef struct TrueHDAtmosBlock {
     uint64_t input_frame_offset;  /* input_access_unit * access_unit_frames */
     const float *const *channels; /* channel_count pointers to frame_count floats, planar,
                                      normalised to [-1, 1): value = pcm24 / 8388608 exactly (a
-                                     library built without matrix-interpolation decodes an
-                                     object presentation that interpolates approximately, and
-                                     its values can then exceed that range) */
+                                     library built without matrix-interpolation, not the
+                                     default, decodes an object presentation that interpolates
+                                     approximately, and its values can then exceed that range) */
     const uint8_t *speakers;      /* channel_count TRUEHD_ATMOS_SPEAKER_* codes */
     const TrueHDAtmosMetadata *metadata; /* see TRUEHD_ATMOS_BLOCK_HAS_METADATA, else NULL */
     uint32_t bed_channel_count;   /* see truehd_atmos_decoder_set_bed_companion(), else 0 */

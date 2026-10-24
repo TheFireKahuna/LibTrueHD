@@ -68,7 +68,7 @@ TARGETS=(
 for target in "${TARGETS[@]}"; do
     echo "==> Building $target"
     cargo rustc --release --locked --lib --crate-type staticlib \
-        ${TRUEHD_ATMOS_FEATURES:+--features "$TRUEHD_ATMOS_FEATURES"} \
+        ${TRUEHD_ATMOS_NO_INTERPOLATION:+--no-default-features} \
         --target "$target" --target-dir "$CARGO_DIR"
 done
 
