@@ -44,6 +44,9 @@ fn empty_block() -> Block {
         bed_channel_count: 0,
         bed_channels: ptr::null(),
         bed_speakers: ptr::null(),
+        input_timing: 0,
+        output_timing: 0,
+        output_position: 0,
     }
 }
 
@@ -518,4 +521,145 @@ fn ignore_interpolation_is_per_handle_and_survives_reset() {
         feed(&held, &data).iter().map(|x| &x.0).collect::<Vec<_>>(),
         b.iter().map(|x| &x.0).collect::<Vec<_>>()
     );
+}
+
+/// (output_timing, output_position or None, input_timing, frame_count) of every block.
+fn clocks(d: &Decoder) -> Vec<(u32, Option<u32>, u32, u32)> {
+    let mut out = Vec::new();
+    loop {
+        let mut b = empty_block();
+        match unsafe { truehd_atmos_decoder_pull(d.0, &mut b) } {
+            OK => out.push((
+                b.output_timing,
+                (b.flags & BLOCK_OUTPUT_POSITION != 0).then_some(b.output_position),
+                b.input_timing,
+                b.frame_count,
+            )),
+            NEED_MORE_DATA => return out,
+            other => panic!("pull returned {other}"),
+        }
+    }
+}
+
+fn feed_clocks(d: &Decoder, data: &[u8]) -> Vec<(u32, Option<u32>, u32, u32)> {
+    let mut out = Vec::new();
+    for chunk in data.chunks(1 << 20) {
+        assert_eq!(d.push(chunk, 0), OK);
+        out.extend(clocks(d));
+    }
+    out
+}
+
+/// output_timing is the stream's presentation clock: block after block it advances by the
+/// frame count, restarting only where the stream is spliced, and a decode started at any
+/// access unit reads the same clock for the same audio. Where the stream sends
+/// hires_output_timing the 32-bit position agrees with it.
+#[test]
+fn output_timing_is_the_streams_presentation_clock() {
+    let mut streams: Vec<(String, Vec<u8>)> = [
+        "fba_176k.mlp",
+        "fba_192k.mlp",
+        "fba_192k_8ch.mlp",
+        "fba_2ch.mlp",
+        "fba_atmos_cbi.mlp",
+        "fba_atmos_dimtrim.mlp",
+        "fba_atmos_obj.mlp",
+        "fba_spliced.mlp",
+    ]
+    .iter()
+    .map(|n| (n.to_string(), asset(n)))
+    .collect();
+    for name in ["helicopter.thd", "atmos-714.thd"] {
+        if let Some(data) = sample(name) {
+            streams.push((name.into(), data));
+        }
+    }
+    for (name, data) in streams {
+        let d = Decoder::new(PRESENTATION_HIGHEST);
+        let full = feed_clocks(&d, &data);
+        assert!(full.len() > 2, "{name}");
+        let breaks = full
+            .windows(2)
+            .filter(|w| (w[1].0.wrapping_sub(w[0].0) & 0xFFFF) != w[0].3)
+            .count();
+        if name.contains("spliced") {
+            assert!((1..=2).contains(&breaks), "{name}: {breaks} breaks");
+        } else {
+            assert_eq!(breaks, 0, "{name}: output_timing did not advance by the frame count");
+        }
+        for (output_timing, position, ..) in &full {
+            if let Some(position) = position {
+                assert_eq!(position & 0xFFFF, *output_timing, "{name}: position and output_timing disagree");
+            }
+        }
+        if name.ends_with(".thd") {
+            let positioned = full.iter().filter(|c| c.1.is_some()).count();
+            assert!(positioned * 10 > full.len() * 9, "{name}: {positioned} of {} blocks have a position", full.len());
+        }
+
+        // From the access unit after the first major sync, so decoding starts at the second:
+        // the same clocks, block for block.
+        let aus = access_units(&data);
+        if aus.iter().filter(|a| a.1).count() < 2 {
+            continue;
+        }
+        let start = aus.iter().position(|a| a.1).unwrap() + 1;
+        let d = Decoder::new(PRESENTATION_HIGHEST);
+        let tail = feed_clocks(&d, &data[aus[start].0..]);
+        assert!(!tail.is_empty(), "{name}: nothing after the seek");
+        let at = full
+            .iter()
+            .position(|c| c.0 == tail[0].0 && c.2 == tail[0].2)
+            .unwrap_or_else(|| panic!("{name}: the seek's clock is not in the full decode"));
+        let pair = |c: &(u32, Option<u32>, u32, u32)| (c.0, c.2, c.3);
+        assert_eq!(
+            full[at..at + tail.len()].iter().map(pair).collect::<Vec<_>>(),
+            tail.iter().map(pair).collect::<Vec<_>>(),
+            "{name}: the seek reads a different clock"
+        );
+        for (a, b) in full[at..].iter().zip(&tail) {
+            if let (Some(x), Some(y)) = (a.1, b.1) {
+                assert_eq!(x, y, "{name}: the seek's position differs");
+            }
+        }
+    }
+}
+
+/// A damaged access unit header whose parity still passes is caught by its input_timing:
+/// XOR-ing 0x11 into both timing bytes keeps the header parity and moves the timing out of
+/// the bounds the format sets.
+#[test]
+fn a_header_whose_parity_passes_is_still_caught_by_its_timing() {
+    let data = asset("fba_atmos_dimtrim.mlp");
+    let aus = access_units(&data);
+    let clean = Decoder::new(PRESENTATION_HIGHEST);
+    let blocks = feed_clocks(&clean, &data).len();
+    assert_eq!(clean.stats().sync_errors, 0);
+
+    // A non-major access unit in the middle whose altered timing leaves the bounds.
+    let (i, _) = aus
+        .iter()
+        .enumerate()
+        .skip(aus.len() / 2)
+        .find(|&(i, a)| {
+            if a.1 || aus[i - 1].1 {
+                return false;
+            }
+            let prev = u16::from_be_bytes([data[aus[i - 1].0 + 2], data[aus[i - 1].0 + 3]]);
+            let t = u16::from_be_bytes([data[a.0 + 2], data[a.0 + 3]]) ^ 0x1111;
+            let interval = t.wrapping_sub(prev);
+            !(10..=3600).contains(&interval)
+        })
+        .expect("no access unit to alter");
+    let mut damaged = data.clone();
+    damaged[aus[i].0 + 2] ^= 0x11;
+    damaged[aus[i].0 + 3] ^= 0x11;
+    let d = Decoder::new(PRESENTATION_HIGHEST);
+    let out = feed_clocks(&d, &damaged);
+    assert!(d.stats().sync_errors >= 1, "the altered header was accepted");
+    assert!(out.len() < blocks, "nothing was dropped to resync");
+    // After the resync the clock is the stream's again.
+    let last = out.last().unwrap();
+    let full = feed_clocks(&Decoder::new(PRESENTATION_HIGHEST), &data);
+    assert_eq!(last.0, full.last().unwrap().0);
 }

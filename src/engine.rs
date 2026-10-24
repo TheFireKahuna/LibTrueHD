@@ -56,6 +56,13 @@ pub struct Engine {
     resolved: usize,
     required: [bool; MAX_PRESENTATIONS],
     oamd_seen: bool,
+    /// The stream's presentation clock (see the header's SOURCE POSITION): the ordinal of the
+    /// access unit whose restart header was read last, and its output_timing.
+    output_clock: Option<(u64, u16)>,
+    /// Ordinal of the first access unit the parser took since it was reset, which is its
+    /// access unit 0, and the 32-bit position hires_output_timing gives that access unit.
+    parse_origin: Option<u64>,
+    hires_origin: Option<(u64, u32)>,
 
     chunks: VecDeque<Chunk>,
     chunk_serial: u64,
@@ -98,6 +105,9 @@ impl Engine {
             resolved: 0,
             required: [false; MAX_PRESENTATIONS],
             oamd_seen: false,
+            output_clock: None,
+            parse_origin: None,
+            hires_origin: None,
             chunks: VecDeque::with_capacity(64),
             chunk_serial: 0,
             pushed: 0,
@@ -174,6 +184,9 @@ impl Engine {
 
     fn restart_decoding(&mut self) {
         self.parser.reset_for_next_major_sync();
+        self.output_clock = None;
+        self.parse_origin = None;
+        self.hires_origin = None;
         self.decoder.reset_for_next_major_sync();
         self.waiting_for_sync = true;
         self.objects.clear();
@@ -373,6 +386,20 @@ impl Engine {
         // Branch records only grow; nothing here reads them.
         drop(self.parser.take_branches());
 
+        let origin = *self.parse_origin.get_or_insert(frame.index);
+        if let Some(output_timing) = au
+            .substream_segment
+            .iter()
+            .flat_map(|segment| segment.block.iter())
+            .find_map(|block| block.restart_header.as_ref().map(|rh| rh.output_timing))
+        {
+            self.output_clock = Some((frame.index, output_timing));
+        }
+        if self.hires_origin.is_none() {
+            // The parser states the position of its access unit 0.
+            self.hires_origin = self.parser.hires_output_timing().map(|start| (origin, start as u32));
+        }
+
         // Object metadata is parsed here rather than by the decoder, which would fail the whole
         // access unit (audio included) on a payload it cannot read.
         self.oamd_bytes.clear();
@@ -520,6 +547,18 @@ impl Engine {
             .desc
             .as_ref()
             .map_or(decoded.sample_length as u32, |d| d.access_unit_frames);
+        let frames_since = |ordinal: u64| ((info.ordinal - ordinal) as u32).wrapping_mul(access_unit_frames);
+        let output_timing = self
+            .output_clock
+            .map_or(0, |(ordinal, timing)| timing.wrapping_add(frames_since(ordinal) as u16));
+        // hires_output_timing picks the 2^16-frame window; output_timing is the exact frame in it.
+        let output_position = self.hires_origin.map(|(ordinal, start)| {
+            let estimate = start.wrapping_add(frames_since(ordinal));
+            estimate.wrapping_sub((estimate as u16).wrapping_sub(output_timing) as i16 as i32 as u32)
+        });
+        if output_position.is_some() {
+            flags |= BLOCK_OUTPUT_POSITION;
+        }
         *out = Block {
             sample_rate: decoded.sampling_frequency,
             frame_count: frames as u32,
@@ -547,6 +586,9 @@ impl Engine {
             } else {
                 std::ptr::null()
             },
+            input_timing: info.input_timing as u32,
+            output_timing: output_timing as u32,
+            output_position: output_position.unwrap_or(0),
         };
 
         self.sample_position += frames as u64;

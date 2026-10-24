@@ -45,6 +45,8 @@ while truehd_atmos_decoder_pull(decoder, &block) == TRUEHD_ATMOS_OK {
     // block.speakers: each element's speaker code, TRUEHD_ATMOS_SPEAKER_OBJECT for objects
     // block.metadata: OAMD updates starting in this block (positions, gain, size, zones, ...)
     // block.input_frame_offset: input frames before this block since the last reset
+    // block.output_timing: where this block plays, from the stream's own clock (mod 2^16);
+    //   block.output_position: the same in 32 bits, with TRUEHD_ATMOS_BLOCK_OUTPUT_POSITION
 }
 
 // On seek:

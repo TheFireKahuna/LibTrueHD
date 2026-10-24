@@ -53,6 +53,7 @@ pub const BLOCK_LAYOUT_CHANGED: u32 = 1 << 1;
 pub const BLOCK_HAS_METADATA: u32 = 1 << 2;
 pub const BLOCK_METADATA_UPDATED: u32 = 1 << 3;
 pub const BLOCK_INPUT_OFFSET_ESTIMATED: u32 = 1 << 4;
+pub const BLOCK_OUTPUT_POSITION: u32 = 1 << 5;
 
 pub const FORMAT_TRUEHD: u32 = 0;
 pub const FORMAT_MLP: u32 = 1;
@@ -189,6 +190,9 @@ pub struct Block {
     pub bed_channel_count: u32,
     pub bed_channels: *const *const f32,
     pub bed_speakers: *const u8,
+    pub input_timing: u32,
+    pub output_timing: u32,
+    pub output_position: u32,
 }
 
 #[repr(C)]
@@ -255,7 +259,7 @@ const _: () = {
     assert!(size_of::<Trim>() == 24);
     assert!(size_of::<Metadata>() == 40);
     assert!(offset_of!(Metadata, updates) == 24);
-    assert!(size_of::<Block>() == 112);
+    assert!(size_of::<Block>() == 128);
     assert!(offset_of!(Block, pts) == 24);
     assert!(offset_of!(Block, layout_serial) == 36);
     assert!(offset_of!(Block, input_frame_offset) == 56);
@@ -264,6 +268,9 @@ const _: () = {
     assert!(offset_of!(Block, bed_channel_count) == 88);
     assert!(offset_of!(Block, bed_channels) == 96);
     assert!(offset_of!(Block, bed_speakers) == 104);
+    assert!(offset_of!(Block, input_timing) == 112);
+    assert!(offset_of!(Block, output_timing) == 116);
+    assert!(offset_of!(Block, output_position) == 120);
     assert!(size_of::<PresentationInfo>() == 28);
     assert!(size_of::<StreamInfo>() == 36 + 4 * 28);
     assert!(size_of::<Stats>() == 13 * 8);

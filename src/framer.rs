@@ -14,7 +14,12 @@
 //!
 //! Validation mirrors the extractor: a major sync counts only with a correct major sync info
 //! CRC and header parity, and every other access unit's header nibble parity is checked
-//! against the substream count the last major sync declared.
+//! against the substream count the last major sync declared. The header's input_timing is
+//! checked too, as the format bounds it: from one access unit to the next it advances by at
+//! least a quarter of an access unit, at most 75 ms, and never faster than the declared peak
+//! data rate allows. A major sync is exempt (a splice or seamless branch restarts the clock
+//! there, and its CRC already proves it). Parity alone passes one damaged header in 16; with
+//! the timing bounds about one in three hundred.
 
 use truehd::structs::sync::{MAJOR_SYNC_FBA, MAJOR_SYNC_FBB};
 use truehd::utils::crc::{CRC_MAJOR_SYNC_INFO_ALG, Crc16};
@@ -30,6 +35,46 @@ const SCAN_KEEP: usize = 4 + 3;
 /// units in them estimated). FBA places a major sync at least every 128 access units.
 const MAX_RETAINED: usize = 4 << 20;
 
+/// What the last major sync says an access unit's input_timing may do.
+#[derive(Clone, Copy, Debug)]
+struct TimingBounds {
+    min_interval: u32,
+    max_interval: u32,
+    /// Some(peak_data_rate) for a variable-rate stream.
+    peak_data_rate: Option<u32>,
+}
+
+impl TimingBounds {
+    /// From a major sync access unit's bytes (validated).
+    fn of_major_sync(b: &[u8]) -> Self {
+        let fbb = be32(&b[4..8]) == MAJOR_SYNC_FBB;
+        let code = if fbb { b[9] >> 4 } else { b[8] >> 4 };
+        let rate = match code {
+            0..=2 => 48_000u32 << code,
+            8..=10 => 44_100u32 << (code - 8),
+            _ => 48_000,
+        };
+        let samples_per_au = 40 * (rate / 44_100);
+        let rate_word = u16::from_be_bytes([b[18], b[19]]);
+        Self {
+            min_interval: samples_per_au / 4,
+            max_interval: (rate * 3).div_ceil(40),
+            peak_data_rate: (rate_word & 0x8000 != 0).then_some((rate_word & 0x7FFF) as u32),
+        }
+    }
+
+    /// Whether an access unit with `timing` may follow one with `prev_timing` that was
+    /// `prev_words` 16-bit words long.
+    fn admits(&self, prev_timing: u16, prev_words: u32, timing: u16) -> bool {
+        let interval = timing.wrapping_sub(prev_timing) as u32;
+        interval >= self.min_interval
+            && interval <= self.max_interval
+            && self
+                .peak_data_rate
+                .is_none_or(|peak| (prev_words as u64) << 8 <= interval as u64 * peak as u64)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct AuInfo {
     /// Byte offset of the access unit's first byte, counted from the first byte pushed.
@@ -38,6 +83,10 @@ pub struct AuInfo {
     /// Access units before this one since the framer was created or reset.
     pub ordinal: u64,
     pub major_sync: bool,
+    /// The header's input_timing: when the access unit's first byte enters the decoder's
+    /// FIFO in the format's buffer model, modulo 2^16. Not the access unit's presentation
+    /// time (that is output_timing); see the header. Zero for one only counted.
+    pub input_timing: u16,
 }
 
 pub enum Next<'a> {
@@ -69,6 +118,10 @@ pub struct Framer {
     queued_next: usize,
     /// Substream count declared by the last accepted major sync.
     substreams: usize,
+    /// input_timing bounds from the last accepted major sync.
+    bounds: Option<TimingBounds>,
+    /// input_timing and length in words of the last access unit handed out, while locked.
+    last_timing: Option<(u16, u32)>,
     ordinal: u64,
     estimated: bool,
     /// Access units and their bytes framed since creation, for estimates.
@@ -92,6 +145,8 @@ impl Default for Framer {
             queued: Vec::with_capacity(160),
             queued_next: 0,
             substreams: 0,
+            bounds: None,
+            last_timing: None,
             ordinal: 0,
             estimated: false,
             framed_aus: 0,
@@ -115,6 +170,7 @@ impl Framer {
         };
         self.queued.clear();
         self.queued_next = 0;
+        self.last_timing = None;
         self.ordinal = 0;
         self.estimated = false;
         self.sync_errors = 0;
@@ -181,12 +237,15 @@ impl Framer {
                 let len = self.queued[self.queued_next];
                 self.queued_next += 1;
                 let offset = self.consumed;
+                let input_timing = u16::from_be_bytes([self.buf[self.cursor + 2], self.buf[self.cursor + 3]]);
+                self.last_timing = Some((input_timing, (len / 2) as u32));
                 let ordinal = self.take_ordinal(len);
                 self.consume(len);
                 return Next::Skipped(AuInfo {
                     offset,
                     ordinal,
                     major_sync: false,
+                    input_timing,
                 });
             }
             match self.state {
@@ -202,6 +261,8 @@ impl Framer {
                     Check::Valid { len, major } => {
                         let start = self.cursor;
                         let offset = self.consumed;
+                        let input_timing = u16::from_be_bytes([self.buf[start + 2], self.buf[start + 3]]);
+                        self.last_timing = Some((input_timing, (len / 2) as u32));
                         let ordinal = self.take_ordinal(len);
                         self.consume(len);
                         return Next::Au(
@@ -209,6 +270,7 @@ impl Framer {
                                 offset,
                                 ordinal,
                                 major_sync: major,
+                                input_timing,
                             },
                             &self.buf[start..start + len],
                         );
@@ -216,6 +278,7 @@ impl Framer {
                     Check::NeedData => return Next::NeedData,
                     Check::Invalid => {
                         self.sync_errors += 1;
+                        self.last_timing = None;
                         self.state = State::Seeking {
                             scan: self.cursor + 1,
                             after_damage: true,
@@ -241,13 +304,20 @@ impl Framer {
             match self.major_sync_at(at) {
                 Some(Some(substreams)) => {
                     self.substreams = substreams;
+                    self.bounds = Some(TimingBounds::of_major_sync(&self.buf[at..]));
                     Check::Valid { len, major: true }
                 }
                 Some(None) => Check::Invalid,
                 None => Check::NeedData,
             }
         } else {
+            let timing = u16::from_be_bytes([b[2], b[3]]);
+            let timed = match (self.bounds, self.last_timing) {
+                (Some(bounds), Some((prev, prev_words))) => bounds.admits(prev, prev_words, timing),
+                _ => true,
+            };
             match parity(b, self.substreams, 0) {
+                Some(true) if !timed => Check::Invalid,
                 Some(true) if b.len() >= len => Check::Valid { len, major: false },
                 Some(true) => Check::NeedData,
                 Some(false) => Check::Invalid,
@@ -313,6 +383,7 @@ impl Framer {
                 Some(None) => scan = c + 1,
                 Some(Some(substreams)) => {
                     self.substreams = substreams;
+                    self.bounds = Some(TimingBounds::of_major_sync(&self.buf[c..]));
                     self.chain_back(c, after_damage);
                     self.state = State::Locked;
                     return true;
@@ -331,7 +402,9 @@ impl Framer {
 
         // hops[(n - p) / 2]: access units on the chain from position p to the sync, 0 if p
         // does not start one. Lengths are whole 16-bit words, so every start on a chain into
-        // the sync is an even distance before it.
+        // the sync is an even distance before it. Each hop between two of them must also keep
+        // input_timing within the bounds; the hop into the major sync is exempt, as when locked.
+        let bounds = self.bounds;
         let mut first = n;
         if n >= MIN_AU_LEN {
             let mut hops = vec![0u32; n / 2 + 1];
@@ -344,8 +417,19 @@ impl Framer {
                         && len <= a.len()
                         && !is_sync_word(be32(&a[4..8]))
                         && parity(&a[..len], self.substreams, 0) == Some(true);
-                    if starts_chain {
-                        let next = p + len;
+                    let next = p + len;
+                    // Only a hop onto a chain start is checked: the bytes there are an access unit.
+                    let timed = || {
+                        next == n
+                            || bounds.is_none_or(|bounds| {
+                                bounds.admits(
+                                    u16::from_be_bytes([a[2], a[3]]),
+                                    (len / 2) as u32,
+                                    u16::from_be_bytes([region[next + 2], region[next + 3]]),
+                                )
+                            })
+                    };
+                    if starts_chain && (next == n || hops[(n - next) / 2] > 0) && timed() {
                         let h = if next == n { 1 } else { hops[(n - next) / 2] + 1 };
                         if h > 1 || next == n {
                             hops[(n - p) / 2] = h;

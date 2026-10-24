@@ -29,7 +29,7 @@
 #include "truehd_atmos.h"
 
 _Static_assert(sizeof(TrueHDAtmosElement) == 64, "element layout");
-_Static_assert(sizeof(TrueHDAtmosBlock) == 112, "block layout");
+_Static_assert(sizeof(TrueHDAtmosBlock) == 128, "block layout");
 _Static_assert(sizeof(TrueHDAtmosStreamInfo) == 148, "stream info layout");
 
 /* ---------------------------------------------------------------------------------------- */

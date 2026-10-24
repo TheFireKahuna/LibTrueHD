@@ -343,6 +343,24 @@ typedef struct TrueHDAtmosMetadata {
  * changes the roles (new serial) in the block where its first update starts.
  */
 
+/*
+ * SOURCE POSITION: TrueHD carries its own presentation clock. Every restart header (each
+ * substream's, at every major sync) states output_timing, the frame at which that access
+ * unit plays, modulo 2^16; each access unit after it plays access_unit_frames later, so a
+ * block's output_timing is exact from the first block after create()/reset(). A stream that
+ * sends hires_output_timing (one bit per access unit, completed some access units after a
+ * major sync) adds the high 16 bits: then output_position is the block's frame in 32 bits and
+ * TRUEHD_ATMOS_BLOCK_OUTPUT_POSITION is set. Without it, a container timestamp good to within
+ * 2^15 frames picks the 2^16-frame window exactly, so a Matroska millisecond becomes the exact
+ * frame. A splice or a different stream restarts the clock at its major sync.
+ *
+ * input_timing is the access unit header's other time: when its first byte enters the
+ * decoder's FIFO in the format's buffer model. It runs ahead of output_timing by a latency
+ * that varies with the data rate (measured from one access unit to over 70 ms within one
+ * stream), so it does not say where a block plays. The framer holds it to the format's bounds
+ * (see the framer) to reject damaged access units whose header parity happens to pass.
+ */
+
 /* TrueHDAtmosBlock.flags */
 /** First block after create/reset/set_presentation, or after data was dropped to resync. */
 #define TRUEHD_ATMOS_BLOCK_DISCONTINUITY 0x01u
@@ -354,6 +372,8 @@ typedef struct TrueHDAtmosMetadata {
 #define TRUEHD_ATMOS_BLOCK_METADATA_UPDATED 0x08u
 /** input_access_unit includes an estimate (see INPUT TIMELINE); sticky until reset(). */
 #define TRUEHD_ATMOS_BLOCK_INPUT_OFFSET_ESTIMATED 0x10u
+/** .output_position is known (see SOURCE POSITION). */
+#define TRUEHD_ATMOS_BLOCK_OUTPUT_POSITION 0x20u
 
 typedef struct TrueHDAtmosBlock {
     uint32_t sample_rate;         /* Hz: 44100, 48000, 88200, 96000, 176400 or 192000 */
@@ -385,6 +405,12 @@ typedef struct TrueHDAtmosBlock {
     const float *const *bed_channels; /* bed_channel_count planes of frame_count floats, as
                                      .channels; NULL when bed_channel_count is 0 */
     const uint8_t *bed_speakers;  /* bed_channel_count TRUEHD_ATMOS_SPEAKER_* codes, or NULL */
+    uint32_t input_timing;        /* 0..65535: the access unit header's input_timing; see SOURCE
+                                     POSITION (a buffer time, not where the block plays) */
+    uint32_t output_timing;       /* 0..65535: where this block's first frame plays, in frames at
+                                     sample_rate, modulo 2^16; see SOURCE POSITION */
+    uint32_t output_position;     /* the same position in full 32 bits, with
+                                     TRUEHD_ATMOS_BLOCK_OUTPUT_POSITION; else 0 */
 } TrueHDAtmosBlock;
 
 /* ------------------------------------------------------------------------------------------ */
