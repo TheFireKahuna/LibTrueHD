@@ -336,14 +336,16 @@ fn tiny_pushes_far_from_a_major_sync() {
     }
     let b = first.expect("no block");
     assert_eq!(b.input_access_unit, (next - start) as u64);
-    // pts is the index of the push holding the access unit's first byte while that push had a
-    // record of its own; past 65536 waiting pushes it is unknown rather than wrong.
+    // pts is the latest timestamp pushed at or before the access unit's first byte by a push with a
+    // record of its own (past 65536 waiting pushes, later ones share one and state none), and
+    // pts_au_index counts access units from the first one at or after that push.
     let first_byte_push = (aus[next].0 - aus[start].0) as i64;
+    assert!(b.pts != NO_PTS && b.pts <= first_byte_push, "pts {}", b.pts);
     if first_byte_push < 1 << 16 {
         assert_eq!((b.pts, b.pts_au_index), (first_byte_push, 0));
-    } else {
-        assert_eq!(b.pts, NO_PTS);
     }
+    let stamped = aus[start..].iter().position(|a| (a.0 - aus[start].0) as i64 >= b.pts).unwrap();
+    assert_eq!(b.pts_au_index as usize, next - start - stamped);
     assert_eq!(b.flags & BLOCK_INPUT_OFFSET_ESTIMATED, 0);
     assert!(aus[next].0 - aus[start].0 > 1 << 16, "not far enough to exercise the limit");
 }
@@ -662,4 +664,29 @@ fn a_header_whose_parity_passes_is_still_caught_by_its_timing() {
     let last = out.last().unwrap();
     let full = feed_clocks(&Decoder::new(PRESENTATION_HIGHEST), &data);
     assert_eq!(last.0, full.last().unwrap().0);
+}
+
+/// Laced Matroska after a seek: only the first packet carries a timestamp, and its access units
+/// are skipped while the decoder waits for a major sync. Every block still carries that timestamp
+/// with its distance in access units from it, so each is placed.
+#[test]
+fn every_block_carries_the_latest_timestamp_before_it() {
+    let data = asset("fba_atmos_dimtrim.mlp");
+    let aus = access_units(&data);
+    // From the access unit after the first major sync, one push per access unit.
+    let start = aus.iter().position(|a| a.1).unwrap() + 1;
+    let d = Decoder::new(PRESENTATION_HIGHEST);
+    let mut blocks = Vec::new();
+    for (i, w) in aus[start..].windows(2).enumerate() {
+        let pts = if i == 0 { 1000 } else { NO_PTS };
+        assert_eq!(d.push(&data[w[0].0..w[1].0], pts), OK);
+        while let Some(b) = first_block(&d) {
+            blocks.push((b.pts, b.pts_au_index, b.input_access_unit));
+        }
+    }
+    assert!(!blocks.is_empty());
+    for (pts, index, ordinal) in blocks {
+        assert_eq!(pts, 1000);
+        assert_eq!(index as u64, ordinal, "the timestamp's push started access unit 0");
+    }
 }

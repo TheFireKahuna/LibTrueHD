@@ -68,7 +68,9 @@ pub struct Engine {
     chunk_serial: u64,
     pushed: u64,
     au_chunk: Option<u64>,
-    au_in_chunk: u32,
+    /// The latest timestamp pushed at or before the access unit being attributed: its pts and the
+    /// ordinal of the first access unit that started in its push.
+    stamp: Option<(i64, u64)>,
 
     sample_position: u64,
     pending_flags: u32,
@@ -112,7 +114,7 @@ impl Engine {
             chunk_serial: 0,
             pushed: 0,
             au_chunk: None,
-            au_in_chunk: 0,
+            stamp: None,
             sample_position: 0,
             pending_flags: BLOCK_DISCONTINUITY,
             roles: None,
@@ -147,7 +149,7 @@ impl Engine {
         self.chunks.clear();
         self.pushed = 0;
         self.au_chunk = None;
-        self.au_in_chunk = 0;
+        self.stamp = None;
         self.sample_position = 0;
         self.oamd_seen = false;
         self.stats = Stats::default();
@@ -236,21 +238,24 @@ impl Engine {
         OK
     }
 
-    /// The pts of the push holding `offset`, and how many access units began earlier in it.
-    fn attribute(&mut self, offset: u64) -> (i64, u32) {
+    /// The latest pts pushed at or before the access unit at `offset` (ordinal `ordinal`), and how
+    /// many access units after the first one that pts's push started it is. Called for every
+    /// access unit in order, skipped ones included, so a timestamp whose access units were all
+    /// skipped still places the ones after it.
+    fn attribute(&mut self, offset: u64, ordinal: u64) -> (i64, u32) {
         while self.chunks.len() >= 2 && self.chunks[1].start <= offset {
             self.chunks.pop_front();
         }
-        let Some(chunk) = self.chunks.front().filter(|c| c.start <= offset) else {
-            return (NO_PTS, 0);
-        };
-        if self.au_chunk == Some(chunk.serial) {
-            self.au_in_chunk += 1;
-        } else {
-            self.au_chunk = Some(chunk.serial);
-            self.au_in_chunk = 0;
+        if let Some(chunk) = self.chunks.front().filter(|c| c.start <= offset) {
+            if self.au_chunk != Some(chunk.serial) {
+                self.au_chunk = Some(chunk.serial);
+                if chunk.pts != NO_PTS {
+                    self.stamp = Some((chunk.pts, ordinal));
+                }
+            }
         }
-        (chunk.pts, self.au_in_chunk)
+        self.stamp
+            .map_or((NO_PTS, 0), |(pts, first)| (pts, (ordinal - first) as u32))
     }
 
     pub fn pull(&mut self, out: &mut Block) -> Status {
@@ -274,7 +279,7 @@ impl Engine {
                 }
             };
             self.sync_framer_stats(errors_before);
-            let (pts, pts_au_index) = self.attribute(info.offset);
+            let (pts, pts_au_index) = self.attribute(info.offset, info.ordinal);
 
             let Some(frame) = frame else {
                 self.stats.access_units_skipped += 1;

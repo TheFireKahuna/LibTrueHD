@@ -316,8 +316,10 @@ typedef struct TrueHDAtmosMetadata {
  * waiting for the first major sync, encoder duplicates, and ones that failed to decode all
  * count. input_frame_offset = input_access_unit * access_unit_frames is therefore the number
  * of input frames preceding this block's first frame. To place a block on the source
- * timeline after a seek: time = (pts of the first push after reset) +
- * input_frame_offset / sample_rate. This relies on the first push after create()/reset()
+ * timeline after a seek: time = pts + pts_au_index * access_unit_frames / sample_rate, from
+ * the latest timestamp pushed at or before the block (a push of a laced Matroska block carries
+ * none), so every block after the first timestamp is placed, also when that timestamp's own
+ * access units were skipped while waiting for a major sync. This relies on each timestamped push
  * starting at an access unit boundary, which demuxed packets (MKV, MP4, M2TS/FFmpeg) always
  * do. Counting is per access unit, not per push: an access unit split across several pushes is
  * counted once, attributed to the push holding its first byte; a trailing incomplete access
@@ -384,11 +386,13 @@ typedef struct TrueHDAtmosBlock {
     uint32_t flags;               /* TRUEHD_ATMOS_BLOCK_* */
     uint32_t access_unit_frames;  /* nominal frames per access unit: 40 at 44.1/48 kHz, 80 at
                                      88.2/96 kHz, 160 at 176.4/192 kHz */
-    int64_t pts;                  /* pts given to the push() whose bytes contained this access
-                                     unit's first byte, or TRUEHD_ATMOS_NO_PTS (also when more
-                                     than 65536 pushes were waiting unconsumed and later ones
-                                     with other pts values had to share a record) */
-    uint32_t pts_au_index;        /* access units that started earlier within that same push:
+    int64_t pts;                  /* the latest pts given to push() at or before this access
+                                     unit's first byte since create()/reset() (skipped access
+                                     units' pushes included), or TRUEHD_ATMOS_NO_PTS before any
+                                     (a push without one, or one of more than 65536 waiting
+                                     pushes that had to share a record with other pts values,
+                                     gives none) */
+    uint32_t pts_au_index;        /* access units since the first one that pts's push started:
                                      block time = pts + pts_au_index * access_unit_frames / rate */
     uint32_t layout_serial;       /* see LAYOUT above */
     uint64_t sample_position;     /* frames output since create()/reset(), before this block */
