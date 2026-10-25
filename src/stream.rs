@@ -105,8 +105,9 @@ pub fn speaker_name(code: u8) -> &'static std::ffi::CStr {
 /// The parts of a major sync that define the stream's configuration, used to notice when it
 /// changes: format sync and format info (rate, channel assignments), flags, substream count
 /// and presentation info, and the extra channel meaning (16-channel layout). Left out are
-/// fields that legitimately change from one major sync to the next: the DRC start-up gains
-/// in `channel_meaning`, the peak data rate and the CRC.
+/// fields that may change from one major sync to the next without the configuration changing:
+/// the loudness fields (`channel_meaning`, and the 16-channel dialogue_norm and mix_level at the
+/// head of the extra channel meaning; see `sync_loudness`), the peak data rate and the CRC.
 pub fn major_sync_signature(au: &[u8], out: &mut Vec<u8>) -> bool {
     let Some(msi) = (|| {
         Some(if *au.get(7)? == 0xBB {
@@ -127,7 +128,88 @@ pub fn major_sync_signature(au: &[u8], out: &mut Vec<u8>) -> bool {
     out.extend_from_slice(&info[10..12]); // flags
     out.extend_from_slice(&info[16..18]); // substreams, substream info
     out.extend_from_slice(&info[26..]); // extra channel meaning, if any
+    if info.len() > 27 && info[17] >> 7 != 0 {
+        // 16ch_dialogue_norm and 16ch_mix_level, after extra_channel_meaning_length.
+        out[12] &= 0xF0;
+        out[13] &= 0x01;
+    }
     true
+}
+
+/// A major sync's loudness and dynamic range fields (Dolby TrueHD high level bitstream description
+/// 4.2-4.4), read at every major sync: a stream may change them without changing its
+/// configuration. FBA only; FBB carries none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SyncLoudness {
+    /// Per presentation (2, 6, 8, 16 channels), the stated average dialogue level in LKFS: -1 to
+    /// -63, the reserved 0 read as -31; 0 where the field is absent (no 16-channel presentation).
+    pub dialogue_levels: [i32; MAX_PRESENTATIONS],
+    pub start_up_gain: i32,
+    /// The six bits the description reserves at the head of `channel_meaning`, which the truehd
+    /// crate reads as the heavy DRC start-up gain.
+    pub heavy_start_up_gain: i32,
+    /// Bit 0, 1, 2: 2ch_, 6ch_, 8ch_control_enabled.
+    pub control_enabled: u32,
+    /// Major sync flags bit 13, which makes the restart headers carry heavy DRC.
+    pub heavy_in_stream: bool,
+}
+
+pub fn sync_loudness(au: &[u8]) -> Option<SyncLoudness> {
+    let info = au.get(4..30)?;
+    if info[0..4] != [0xF8, 0x72, 0x6F, 0xBA] {
+        return None;
+    }
+    let mut bits = BitCursor { bytes: &info[18..26], position: 0 };
+    let heavy_start_up_gain = bits.signed(6);
+    let control_enabled = bits.unsigned(3);
+    bits.unsigned(1);
+    let start_up_gain = bits.signed(7);
+    let level = |code: u32| -(if code == 0 { 31 } else { code as i32 });
+    let two = level(bits.unsigned(6));
+    bits.unsigned(6);
+    let six = level(bits.unsigned(5));
+    bits.unsigned(6 + 5);
+    let eight = level(bits.unsigned(5));
+    bits.unsigned(6 + 6 + 1);
+    let extra_channel_meaning = bits.unsigned(1) == 1;
+    let sixteen = if extra_channel_meaning && info[17] >> 7 != 0 {
+        let head = au.get(30..32)?;
+        level(((head[0] as u32 & 0x0F) << 1) | (head[1] as u32 >> 7))
+    } else {
+        0
+    };
+    // Control bits arrive 2ch first; bit 0 of the mask is 2ch.
+    let control_enabled = (control_enabled >> 2 & 1) | (control_enabled & 2) | ((control_enabled & 1) << 2);
+    Some(SyncLoudness {
+        dialogue_levels: [two, six, eight, sixteen],
+        start_up_gain,
+        heavy_start_up_gain,
+        control_enabled,
+        heavy_in_stream: u16::from_be_bytes([info[10], info[11]]) & 0x2000 != 0,
+    })
+}
+
+/// Most significant bit first over a byte slice the caller has sized for every read.
+struct BitCursor<'a> {
+    bytes: &'a [u8],
+    position: usize,
+}
+
+impl BitCursor<'_> {
+    fn unsigned(&mut self, n: usize) -> u32 {
+        let mut value = 0;
+        for _ in 0..n {
+            let byte = self.bytes[self.position / 8];
+            value = value << 1 | (byte >> (7 - self.position % 8) & 1) as u32;
+            self.position += 1;
+        }
+        value
+    }
+
+    fn signed(&mut self, n: usize) -> i32 {
+        let value = self.unsigned(n) as i32;
+        if value >> (n - 1) & 1 == 1 { value - (1 << n) } else { value }
+    }
 }
 
 /// Parses one major sync access unit with every presentation required, so every substream's

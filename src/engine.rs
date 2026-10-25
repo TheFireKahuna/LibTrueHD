@@ -85,6 +85,9 @@ pub struct Engine {
     bed_speakers: [u8; MAX_CHANNELS],
     objects: ObjectState,
     oamd_bytes: Vec<(Option<u64>, Vec<u8>)>,
+    /// The latest major sync's loudness fields, and the dynamic range control data blocks point to.
+    loudness: Option<stream::SyncLoudness>,
+    dynamic_range: Box<DynamicRange>,
 
     stats: Stats,
     last_error: CString,
@@ -127,6 +130,8 @@ impl Engine {
             bed_speakers: [SPEAKER_UNKNOWN; MAX_CHANNELS],
             objects: ObjectState::default(),
             oamd_bytes: Vec::with_capacity(4),
+            loudness: None,
+            dynamic_range: Box::default(),
             stats: Stats::default(),
             last_error: CString::default(),
             poisoned: false,
@@ -328,6 +333,9 @@ impl Engine {
     /// At a major sync: learn the stream on a configuration change and set the parser and
     /// decoder up for the presentation to decode. Returns false to skip this access unit.
     fn configure(&mut self, frame: &Frame) -> bool {
+        if let Some(loudness) = stream::sync_loudness(frame.as_ref()) {
+            self.loudness = Some(loudness);
+        }
         if !stream::major_sync_signature(frame.as_ref(), &mut self.signature_scratch) {
             return true;
         }
@@ -404,6 +412,7 @@ impl Engine {
             // The parser states the position of its access unit 0.
             self.hires_origin = self.parser.hires_output_timing().map(|start| (origin, start as u32));
         }
+        self.update_dynamic_range();
 
         // Object metadata is parsed here rather than by the decoder, which would fail the whole
         // access unit (audio included) on a payload it cannot read.
@@ -434,6 +443,37 @@ impl Engine {
             .find_map(|(i, slot)| slot.take().map(|d| (d, i)))
             .ok_or_else(|| "decoder produced no presentation".to_string())?;
         Ok(Some((main, index, bed)))
+    }
+
+    /// Dynamic range control as of the access unit just parsed: the latest major sync's start-up
+    /// gains and control bits, and every substream's state as the parser keeps it.
+    fn update_dynamic_range(&mut self) {
+        let substreams = self.desc.as_ref().map_or(0, |d| d.substreams as usize).min(MAX_SUBSTREAMS);
+        let drc = &mut *self.dynamic_range;
+        if let Some(loudness) = self.loudness {
+            drc.start_up_gain = loudness.start_up_gain;
+            drc.heavy_start_up_gain = loudness.heavy_start_up_gain;
+            drc.control_enabled = loudness.control_enabled;
+            drc.heavy_in_stream = loudness.heavy_in_stream as u32;
+        }
+        drc.substream_count = substreams as u32;
+        let count = |n: usize| n.min(u32::MAX as usize) as u32;
+        for (i, slot) in drc.substreams.iter_mut().enumerate() {
+            *slot = match self.parser.substream_state(i).filter(|_| i < substreams) {
+                Some(state) => SubstreamDynamicRange {
+                    active: state.drc_active as u32,
+                    gain_update: state.drc_gain_update as i32,
+                    time_update: state.drc_time_update as u32,
+                    count: count(state.drc_count),
+                    heavy_active: state.heavy_drc_active as u32,
+                    heavy_present: state.heavy_drc_present as u32,
+                    heavy_gain_update: state.heavy_drc_gain_update as i32,
+                    heavy_time_update: state.heavy_drc_time_update as u32,
+                    heavy_count: count(state.heavy_drc_count),
+                },
+                None => SubstreamDynamicRange::default(),
+            };
+        }
     }
 
     fn emit(
@@ -594,6 +634,11 @@ impl Engine {
             input_timing: info.input_timing as u32,
             output_timing: output_timing as u32,
             output_position: output_position.unwrap_or(0),
+            dynamic_range: if self.desc.as_ref().is_some_and(|d| d.format == FORMAT_TRUEHD) {
+                &*self.dynamic_range
+            } else {
+                std::ptr::null()
+            },
         };
 
         self.sample_position += frames as u64;
@@ -603,6 +648,14 @@ impl Engine {
 
     pub fn stream_info(&self) -> Option<StreamInfo> {
         let desc = self.desc.as_ref()?;
+        let mut presentations = desc.presentations;
+        if let Some(loudness) = self.loudness {
+            for (info, level) in presentations.iter_mut().zip(loudness.dialogue_levels) {
+                if info.ptype != PTYPE_ABSENT {
+                    info.dialogue_level = level;
+                }
+            }
+        }
         Some(StreamInfo {
             format: desc.format,
             sample_rate: desc.sample_rate,
@@ -613,7 +666,7 @@ impl Engine {
             has_objects: desc.has_objects as u32,
             oamd_seen: self.oamd_seen as u32,
             layout_serial: self.layout_serial,
-            presentations: desc.presentations,
+            presentations,
         })
     }
 

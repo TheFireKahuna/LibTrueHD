@@ -377,6 +377,39 @@ typedef struct TrueHDAtmosMetadata {
 /** .output_position is known (see SOURCE POSITION). */
 #define TRUEHD_ATMOS_BLOCK_OUTPUT_POSITION 0x20u
 
+/*
+ * DYNAMIC RANGE CONTROL: the stream's DRC data as of a block's access unit, carried as data and
+ * applied by nothing in this library (the decode stays lossless). The Dolby TrueHD high level
+ * bitstream description gives the syntax only (4.2, 4.3, 4.5); the scales below are the ones the
+ * truehd crate checks the stream against, and which substream's state governs a presentation is
+ * not stated there.
+ */
+typedef struct TrueHDAtmosSubstreamDynamicRange {
+    uint32_t active;              /* 1: a drc_gain_update has arrived since decoding (re)started */
+    int32_t gain_update;          /* the latest drc_gain_update (s9), in 1/64 octave: gain
+                                     2^(gain_update / 64) */
+    uint32_t time_update;         /* its drc_time_update (u3): the next update is due within
+                                     2^time_update access units */
+    uint32_t count;               /* access units since that update */
+    uint32_t heavy_active;        /* 1: a heavy DRC update has arrived since decoding (re)started */
+    uint32_t heavy_present;       /* 1: the latest restart header carried a heavy DRC update */
+    int32_t heavy_gain_update;    /* the latest heavy_drc_gain_update (s9), in 1/32 octave */
+    uint32_t heavy_time_update;   /* its heavy_drc_time_update (u3), as time_update */
+    uint32_t heavy_count;         /* access units since that update */
+} TrueHDAtmosSubstreamDynamicRange;
+
+typedef struct TrueHDAtmosDynamicRange {
+    int32_t start_up_gain;        /* drc_start_up_gain (s7) of the latest major sync, in 1/16
+                                     octave */
+    int32_t heavy_start_up_gain;  /* the six bits the description reserves at the head of
+                                     channel_meaning, read as the heavy DRC start-up gain (s6) in
+                                     1/4 octave */
+    uint32_t control_enabled;     /* bit 0, 1, 2: 2ch_, 6ch_, 8ch_control_enabled */
+    uint32_t heavy_in_stream;     /* 1: major sync flags bit 13, the restart headers carry heavy DRC */
+    uint32_t substream_count;     /* entries of .substreams in use */
+    TrueHDAtmosSubstreamDynamicRange substreams[4];
+} TrueHDAtmosDynamicRange;
+
 typedef struct TrueHDAtmosBlock {
     uint32_t sample_rate;         /* Hz: 44100, 48000, 88200, 96000, 176400 or 192000 */
     uint32_t frame_count;         /* frames in each channel plane (= access_unit_frames except a
@@ -415,6 +448,8 @@ typedef struct TrueHDAtmosBlock {
                                      sample_rate, modulo 2^16; see SOURCE POSITION */
     uint32_t output_position;     /* the same position in full 32 bits, with
                                      TRUEHD_ATMOS_BLOCK_OUTPUT_POSITION; else 0 */
+    const TrueHDAtmosDynamicRange *dynamic_range; /* see DYNAMIC RANGE CONTROL; NULL for MLP FBB,
+                                     which carries none. Valid until the next call on the handle */
 } TrueHDAtmosBlock;
 
 /* ------------------------------------------------------------------------------------------ */
@@ -436,6 +471,12 @@ typedef struct TrueHDAtmosPresentationInfo {
     uint32_t channel_count;  /* 0 when absent */
     uint8_t speakers[TRUEHD_ATMOS_MAX_CHANNELS]; /* channel_count codes, then UNKNOWN; for an
                                                     object presentation: bed speakers, then OBJECT */
+    int32_t dialogue_level;  /* the presentation's average dialogue level in LKFS, -1 to -63, as its
+                                dialogue_norm states it at the latest major sync (Dolby TrueHD high
+                                level bitstream description 4.3, 4.4; the reserved value 0 reads as
+                                -31); 0 when absent, and for MLP FBB, which carries none. A decoder
+                                normalises the presentation's dialogue to -31 LKFS by applying
+                                -(dialogue_level + 31) dB */
 } TrueHDAtmosPresentationInfo;
 
 typedef struct TrueHDAtmosStreamInfo {

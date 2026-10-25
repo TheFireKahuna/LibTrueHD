@@ -29,8 +29,10 @@
 #include "truehd_atmos.h"
 
 _Static_assert(sizeof(TrueHDAtmosElement) == 64, "element layout");
-_Static_assert(sizeof(TrueHDAtmosBlock) == 128, "block layout");
-_Static_assert(sizeof(TrueHDAtmosStreamInfo) == 148, "stream info layout");
+_Static_assert(sizeof(TrueHDAtmosBlock) == 136, "block layout");
+_Static_assert(sizeof(TrueHDAtmosStreamInfo) == 164, "stream info layout");
+_Static_assert(sizeof(TrueHDAtmosSubstreamDynamicRange) == 36, "substream DRC layout");
+_Static_assert(sizeof(TrueHDAtmosDynamicRange) == 164, "DRC layout");
 
 /* ---------------------------------------------------------------------------------------- */
 

@@ -6,6 +6,7 @@ use std::mem::{offset_of, size_of};
 pub const API_VERSION: u32 = 3;
 pub const MAX_CHANNELS: usize = 16;
 pub const MAX_BLOCK_FRAMES: usize = 160;
+pub const MAX_SUBSTREAMS: usize = 4;
 pub const NO_PTS: i64 = i64::MIN;
 
 pub type Status = i32;
@@ -193,6 +194,34 @@ pub struct Block {
     pub input_timing: u32,
     pub output_timing: u32,
     pub output_position: u32,
+    pub dynamic_range: *const DynamicRange,
+}
+
+/// One substream's dynamic range control state after an access unit, as the truehd parser keeps it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SubstreamDynamicRange {
+    pub active: u32,
+    pub gain_update: i32,
+    pub time_update: u32,
+    pub count: u32,
+    pub heavy_active: u32,
+    pub heavy_present: u32,
+    pub heavy_gain_update: i32,
+    pub heavy_time_update: u32,
+    pub heavy_count: u32,
+}
+
+/// The stream's dynamic range control data as of an access unit.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DynamicRange {
+    pub start_up_gain: i32,
+    pub heavy_start_up_gain: i32,
+    pub control_enabled: u32,
+    pub heavy_in_stream: u32,
+    pub substream_count: u32,
+    pub substreams: [SubstreamDynamicRange; MAX_SUBSTREAMS],
 }
 
 #[repr(C)]
@@ -202,6 +231,7 @@ pub struct PresentationInfo {
     pub source: i32,
     pub channel_count: u32,
     pub speakers: [u8; MAX_CHANNELS],
+    pub dialogue_level: i32,
 }
 
 impl PresentationInfo {
@@ -210,6 +240,7 @@ impl PresentationInfo {
         source: -1,
         channel_count: 0,
         speakers: [SPEAKER_UNKNOWN; MAX_CHANNELS],
+        dialogue_level: 0,
     };
 }
 
@@ -259,7 +290,6 @@ const _: () = {
     assert!(size_of::<Trim>() == 24);
     assert!(size_of::<Metadata>() == 40);
     assert!(offset_of!(Metadata, updates) == 24);
-    assert!(size_of::<Block>() == 128);
     assert!(offset_of!(Block, pts) == 24);
     assert!(offset_of!(Block, layout_serial) == 36);
     assert!(offset_of!(Block, input_frame_offset) == 56);
@@ -271,7 +301,12 @@ const _: () = {
     assert!(offset_of!(Block, input_timing) == 112);
     assert!(offset_of!(Block, output_timing) == 116);
     assert!(offset_of!(Block, output_position) == 120);
-    assert!(size_of::<PresentationInfo>() == 28);
-    assert!(size_of::<StreamInfo>() == 36 + 4 * 28);
+    assert!(offset_of!(Block, dynamic_range) == 128);
+    assert!(size_of::<Block>() == 136);
+    assert!(size_of::<SubstreamDynamicRange>() == 36);
+    assert!(size_of::<DynamicRange>() == 20 + 4 * 36);
+    assert!(size_of::<PresentationInfo>() == 32);
+    assert!(offset_of!(PresentationInfo, dialogue_level) == 28);
+    assert!(size_of::<StreamInfo>() == 36 + 4 * 32);
     assert!(size_of::<Stats>() == 13 * 8);
 };

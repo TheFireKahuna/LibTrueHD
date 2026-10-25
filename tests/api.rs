@@ -47,6 +47,7 @@ fn empty_block() -> Block {
         input_timing: 0,
         output_timing: 0,
         output_position: 0,
+        dynamic_range: ptr::null(),
     }
 }
 
@@ -688,5 +689,123 @@ fn every_block_carries_the_latest_timestamp_before_it() {
     for (pts, index, ordinal) in blocks {
         assert_eq!(pts, 1000);
         assert_eq!(index as u64, ordinal, "the timestamp's push started access unit 0");
+    }
+}
+
+const FBA_FIXTURES: [&str; 8] = [
+    "fba_176k.mlp",
+    "fba_192k.mlp",
+    "fba_192k_8ch.mlp",
+    "fba_2ch.mlp",
+    "fba_atmos_cbi.mlp",
+    "fba_atmos_dimtrim.mlp",
+    "fba_atmos_obj.mlp",
+    "fba_spliced.mlp",
+];
+
+/// The access unit at `start` as the truehd crate's own parser reads it, every presentation
+/// required, as the library's probe has it.
+fn reference_parse(parser: &mut truehd::process::parse::Parser, data: &[u8], start: usize, end: usize, index: u64)
+    -> truehd::structs::access_unit::AccessUnit {
+    let frame = truehd::process::extract::Frame {
+        timestamp: None,
+        data: std::sync::Arc::from(&data[start..end]),
+        index,
+        offset: start as u64,
+    };
+    parser.parse(&frame).expect("reference parse")
+}
+
+/// Every presentation's dialogue_level and the dynamic range start-up fields are the major sync's
+/// own, as the truehd crate reads its channel_meaning.
+#[test]
+fn loudness_fields_are_the_major_syncs() {
+    for name in FBA_FIXTURES {
+        let data = asset(name);
+        let aus = access_units(&data);
+        let (first, _) = *aus.iter().find(|a| a.1).expect("a major sync");
+        let end = aus.iter().map(|a| a.0).find(|&p| p > first).unwrap_or(data.len());
+        let mut parser = truehd::process::parse::Parser::default();
+        parser.set_check_fifo(false);
+        let au = reference_parse(&mut parser, &data, first, end, 0);
+        let ms = au.major_sync_info.expect("major sync info");
+        let cm = ms.channel_meaning.fba().expect("FBA channel meaning");
+        let level = |code: u8| -(if code == 0 { 31 } else { code as i32 });
+        let sixteen = cm
+            .extra_channel_meaning
+            .as_ref()
+            .filter(|_| ms.substream_info >> 7 != 0)
+            .map_or(0, |e| level(e.sixteench_dialogue_norm));
+        let expected = [level(cm.twoch_dialogue_norm), level(cm.sixch_dialogue_norm), level(cm.eightch_dialogue_norm), sixteen];
+
+        let d = Decoder::new(-1);
+        d.push(&data[..end], 0);
+        let block = first_block(&d).unwrap_or_else(|| panic!("{name}: no block"));
+        let mut info = unsafe { std::mem::zeroed::<StreamInfo>() };
+        assert_eq!(unsafe { truehd_atmos_decoder_get_stream_info(d.0, &mut info) }, OK);
+        for (p, presentation) in info.presentations.iter().enumerate() {
+            let want = if presentation.ptype == PTYPE_ABSENT { 0 } else { expected[p] };
+            assert_eq!(presentation.dialogue_level, want, "{name} p{p}");
+        }
+        assert!(!block.dynamic_range.is_null(), "{name}");
+        let drc = unsafe { &*block.dynamic_range };
+        assert_eq!(drc.start_up_gain, cm.drc_start_up_gain as i32, "{name}");
+        assert_eq!(drc.heavy_start_up_gain, cm.heavy_drc_start_up_gain as i32, "{name}");
+        let control = cm.twoch_control_enabled as u32 | (cm.sixch_control_enabled as u32) << 1
+            | (cm.eightch_control_enabled as u32) << 2;
+        assert_eq!(drc.control_enabled, control, "{name}");
+        assert_eq!(drc.heavy_in_stream, (ms.flags & 0x2000 != 0) as u32, "{name}");
+    }
+}
+
+/// MLP FBB carries neither dialogue levels nor dynamic range control.
+#[test]
+fn fbb_carries_no_loudness() {
+    for name in ["fbb_6ch.mlp", "fbb_6ch_single.mlp", "fbb_copy.mlp", "fbb_spliced.mlp"] {
+        let d = Decoder::new(-1);
+        d.push(&asset(name), 0);
+        let block = first_block(&d).unwrap_or_else(|| panic!("{name}: no block"));
+        assert!(block.dynamic_range.is_null(), "{name}");
+        let mut info = unsafe { std::mem::zeroed::<StreamInfo>() };
+        assert_eq!(unsafe { truehd_atmos_decoder_get_stream_info(d.0, &mut info) }, OK);
+        assert!(info.presentations.iter().all(|p| p.dialogue_level == 0), "{name}");
+    }
+}
+
+/// Every block's per-substream dynamic range control is the state the truehd crate's parser holds
+/// after the same access unit, field for field.
+#[test]
+fn substream_dynamic_range_follows_the_parser() {
+    for name in FBA_FIXTURES {
+        let data = asset(name);
+        let aus = access_units(&data);
+        let Some(first) = aus.iter().position(|a| a.1) else { continue };
+        let d = Decoder::new(3);
+        d.push(&data, 0);
+        let mut parser = truehd::process::parse::Parser::default();
+        parser.set_check_fifo(false);
+        let mut compared = 0;
+        for (k, &(start, _)) in aus.iter().enumerate().skip(first) {
+            let end = aus.get(k + 1).map_or(data.len(), |a| a.0);
+            let _ = reference_parse(&mut parser, &data, start, end, (k - first) as u64);
+            let Some(block) = first_block(&d) else { break };
+            let drc = unsafe { &*block.dynamic_range };
+            for s in 0..drc.substream_count as usize {
+                let state = parser.substream_state(s).expect("substream state");
+                let got = drc.substreams[s];
+                let want = (
+                    state.drc_active as u32, state.drc_gain_update as i32, state.drc_time_update as u32,
+                    state.drc_count as u32, state.heavy_drc_active as u32, state.heavy_drc_present as u32,
+                    state.heavy_drc_gain_update as i32, state.heavy_drc_time_update as u32, state.heavy_drc_count as u32,
+                );
+                let have = (
+                    got.active, got.gain_update, got.time_update, got.count, got.heavy_active,
+                    got.heavy_present, got.heavy_gain_update, got.heavy_time_update, got.heavy_count,
+                );
+                assert_eq!(have, want, "{name} access unit {k} substream {s}");
+            }
+            compared += 1;
+        }
+        assert!(compared > 0, "{name}: nothing compared");
     }
 }
