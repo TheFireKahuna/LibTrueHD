@@ -23,7 +23,8 @@
  *   All pointers returned inside TrueHDAtmosBlock (channel planes, speakers, metadata and
  *   everything it points to) are owned by the decoder and stay valid until the next call to
  *   truehd_atmos_decoder_pull(), _reset(), _set_presentation() or _destroy() on the same
- *   handle. push(), get_stream_info(), get_stats() and last_error() do not invalidate them.
+ *   handle. push(), get_stream_info(), get_trims(), get_stats() and last_error() do not
+ *   invalidate them.
  *   Output buffers, metadata and bookkeeping are preallocated per handle. What pull() does
  *   allocate per access unit is the upstream `truehd` parser/decoder's working data (about 11
  *   allocations / 150 KB for a 16-channel access unit, 7 / 120 KB for 8 channels, freed again
@@ -54,7 +55,7 @@ extern "C" {
  * comparable without conversions.
  */
 
-#define TRUEHD_ATMOS_API_VERSION 2u
+#define TRUEHD_ATMOS_API_VERSION 3u
 
 /** Most channels (elements) any presentation can carry. */
 #define TRUEHD_ATMOS_MAX_CHANNELS 16u
@@ -150,28 +151,40 @@ typedef int32_t TrueHDAtmosStatus;
  * Converting to the ADM / Dolby Atmos Master (DAMF) cartesian convention used by `truehdd`'s
  * .atmos.metadata files (x -1 left..+1 right, y +1 front..-1 back, z 0 ear..1 top):
  *   X = 2x - 1,  Y = 1 - 2y,  Z = z.
- * When TRUEHD_ATMOS_ELEMENT_SCREEN_REF is set, x and z are screen-anchored (0..1 across the
- * screen width, -1..1 over its height) and screen_factor/depth_factor say how much of the
- * screen reference to apply (TS 103 420 clause 5.2.1.3).
+ * That holds for room-anchored positions only (TS 103 420 Annex B). When
+ * TRUEHD_ATMOS_ELEMENT_SCREEN_REF is set, x and z are screen-anchored (0..1 across the screen
+ * width, -1..1 over its height) and screen_factor/depth_factor say how much of the screen
+ * reference to apply (TS 103 420 clause 5.2.1.3): resolve that to a room position first. An
+ * element with TRUEHD_ATMOS_ELEMENT_DISTANCE lies outside the room along the ray through its
+ * position (5.2.1.2), which the conversion above does not carry.
  *
  * Bed channels (kind BED/LFE) carry their nominal speaker position in the same coordinates
  * (LFE: 0,0,-1), their gain and ACTIVE flag; the other render fields are zero.
  *
  * TIMING: an OAMD payload arrives with an access unit (every 1536 samples = 32 ms in the
  * streams tested, i.e. every 38-39 access units at 48 kHz) and states one or more updates.
- * Update n starts at (access unit start + evo sample offset + sample_offset + 32 * block
- * offset factor(n)) per TS 103 420 clause 5.3, which can be in a later access unit than the
- * one that carried it. The decoder delivers each update in the block that contains its
- * start frame: TrueHDAtmosMetadataUpdate.frame_offset is always < TrueHDAtmosBlock.frame_count.
- * Rendering rule: at frame_offset, start a linear interpolation from each element's current
- * (possibly mid-ramp) values to the update's values over ramp_frames frames (0 = jump).
- * Elements without TRUEHD_ATMOS_ELEMENT_CHANGED in an update are unchanged; do not restart
- * their ramps (encoders periodically restate unchanged values with zero ramp).
- * Every OAMD payload is complete (no state carries over from earlier payloads), so the first
- * update after create/reset/DISCONTINUITY describes every element (all CHANGED): apply it as
- * a jump, there is nothing to ramp from. Blocks before it have no metadata
- * (TRUEHD_ATMOS_BLOCK_HAS_METADATA clear) - at most one payload interval, typically 32 ms -
- * during which object channels carry audio with no known position; mute or hold them.
+ * Update n starts at (access unit start + sample_offset + 32 * block offset factor(n)) per
+ * TS 103 420 clause 5.3, which can be in a later access unit than the one that carried it.
+ * The EMDF container's smploffst (TS 102 366 H.2.2.3.2) states the same offset, so it is not
+ * added; a container that states a different one is counted in
+ * TrueHDAtmosStats.oamd_offset_mismatches. The decoder delivers each update in the block that
+ * contains its start frame: TrueHDAtmosMetadataUpdate.frame_offset is always <
+ * TrueHDAtmosBlock.frame_count.
+ * Rendering rule (TS 103 448 clause 5.5, pseudocode 19): at frame_offset, start a linear
+ * interpolation of every element, from its current (possibly mid-ramp) gains to the update's
+ * over ramp_frames + 1 frames (0 = jump). Every update restarts every element's ramp, the
+ * elements it restates unchanged included: TRUEHD_ATMOS_ELEMENT_CHANGED only says the values
+ * differ from the previous update's.
+ * Every payload restates every element, so the first update after create/reset/DISCONTINUITY
+ * describes every element (all CHANGED): apply it as a jump, there is nothing to ramp from.
+ * Two things do carry over from earlier payloads, and the decoder resolves both: a divergence
+ * coded as "the previous block's" (object_div_mode 1), and the trim element, which stays in
+ * force until another arrives (TrueHDAtmosMetadataUpdate.trims and .warp_mode). Trims are per
+ * metadata update (TS 103 448 table 2): a payload carrying them without object data has no update
+ * of its own, so they take effect with the next update.
+ * Blocks before the first update have no metadata (TRUEHD_ATMOS_BLOCK_HAS_METADATA clear) - at
+ * most one payload interval, typically 32 ms - during which object channels carry audio with
+ * no known position; mute or hold them.
  */
 
 /* TrueHDAtmosElement.kind */
@@ -191,7 +204,11 @@ typedef int32_t TrueHDAtmosStatus;
 #define TRUEHD_ATMOS_ELEMENT_TRIM_BYPASS 0x080u        /* downmix trims disabled for this element */
 #define TRUEHD_ATMOS_ELEMENT_HEAD_TRACK_DISABLE 0x100u /* headphone head tracking disabled */
 
-/* TrueHDAtmosElement.zone: horizontal zone constraint (TS 103 420 table 20). */
+/* TrueHDAtmosElement.dialog: the element is dialogue. */
+#define TRUEHD_ATMOS_DIALOG_DIALOGUE ((uint8_t)1)
+
+/* TrueHDAtmosElement.zone: horizontal zone constraint (TS 103 420 table 20; the reserved 6 and 7
+ * arrive as ALL). */
 #define TRUEHD_ATMOS_ZONE_ALL ((uint8_t)0)
 #define TRUEHD_ATMOS_ZONE_NO_BACK ((uint8_t)1)
 #define TRUEHD_ATMOS_ZONE_NO_SIDES ((uint8_t)2)
@@ -199,7 +216,9 @@ typedef int32_t TrueHDAtmosStatus;
 #define TRUEHD_ATMOS_ZONE_SCREEN_ONLY ((uint8_t)4)
 #define TRUEHD_ATMOS_ZONE_SURROUND_ONLY ((uint8_t)5)
 
-/* TrueHDAtmosMetadata.warp_mode (OAMD trim element). */
+/* TrueHDAtmosMetadata.warp_mode (OAMD trim element, TS 103 420 table 32). WARPING: every object's
+ * y shall be multiplied by 2 before rendering. 2 and 3 are reserved in TS 103 420; the names are
+ * the Dolby Atmos Master (DAMF) ones truehdd writes for them. */
 #define TRUEHD_ATMOS_WARP_NOT_SIGNALLED ((int32_t)-1)
 #define TRUEHD_ATMOS_WARP_NORMAL ((int32_t)0)
 #define TRUEHD_ATMOS_WARP_WARPING ((int32_t)1)
@@ -210,7 +229,7 @@ typedef struct TrueHDAtmosElement {
     uint8_t kind;            /* TRUEHD_ATMOS_ELEMENT_BED/LFE/OBJECT/ISF */
     uint8_t speaker;         /* bed/LFE: TRUEHD_ATMOS_SPEAKER_*; objects: TRUEHD_ATMOS_SPEAKER_OBJECT */
     uint8_t zone;            /* TRUEHD_ATMOS_ZONE_* (objects) */
-    uint8_t headphone_mode;  /* OAMD headphone render mode 0..2; 255 = not signalled */
+    uint8_t headphone_mode;  /* headphone render mode: 0 bypass, 1 near, 2 far, 3 mid; 255 = not signalled */
     uint32_t flags;          /* TRUEHD_ATMOS_ELEMENT_* */
     float position[3];       /* x, y, z; see COORDINATES above */
     float gain;              /* linear amplitude gain, 0 for -inf dB (range -inf, -49..+15 dB) */
@@ -218,25 +237,56 @@ typedef struct TrueHDAtmosElement {
     float size[3];           /* width, depth, height in 0..1 of the room (0 = point source) */
     float divergence;        /* 0..1 when TRUEHD_ATMOS_ELEMENT_DIVERGENCE, else 0 */
     float priority;          /* 0..1 importance (1 = default/highest) */
-    float distance;          /* metres when TRUEHD_ATMOS_ELEMENT_DISTANCE (INFINITY = at infinity), else 0 */
+    float distance;          /* when TRUEHD_ATMOS_ELEMENT_DISTANCE: distance_factor, the object's distance
+                                over the room boundary's along the same ray (1.1..50.1, INFINITY = at
+                                infinity; TS 103 420 5.2.1.2), else 0 */
     float screen_factor;     /* 0.125..1 when TRUEHD_ATMOS_ELEMENT_SCREEN_REF, else 0 */
-    float depth_factor;      /* 0.25..1 */
-    uint8_t dialog;          /* OAMD object description dialog indication; 255 = not signalled */
-    uint8_t reserved[3];
+    float depth_factor;      /* 0.25, 0.5, 1 or 2 */
+    uint8_t dialog;          /* OAMD object description (element 4, reserved in TS 103 420): 1 dialogue,
+                                2 not dialogue, 3 with dialog_extra, 0 nothing stated; 255 = no element */
+    uint8_t dialog_extra;    /* the 5 bits that come with dialog 3, meaning unknown; 255 = none */
+    uint8_t reserved[2];
 } TrueHDAtmosElement;        /* 64 bytes */
+
+struct TrueHDAtmosTrim;
 
 typedef struct TrueHDAtmosMetadataUpdate {
     uint32_t frame_offset;               /* first frame of this block the update applies from */
     uint32_t ramp_frames;                /* interpolation length in frames, 0 = jump */
     const TrueHDAtmosElement *elements;  /* element_count entries: the values reached after the ramp */
-} TrueHDAtmosMetadataUpdate;
+    const struct TrueHDAtmosTrim *trims; /* TRUEHD_ATMOS_TRIM_CONFIGS entries: the trims in force for
+                                            this update (TS 103 448 table 2: per metadata update) */
+    int32_t warp_mode;                   /* TRUEHD_ATMOS_WARP_*: the warp mode in force for this update */
+    uint32_t reserved;
+} TrueHDAtmosMetadataUpdate;            /* 32 bytes */
+
+/* TrueHDAtmosTrim.mode */
+#define TRUEHD_ATMOS_TRIM_DEFAULT ((uint8_t)0)   /* the renderer's own trim (TS 103 448 pseudocode 16) */
+#define TRUEHD_ATMOS_TRIM_DISABLED ((uint8_t)1)  /* no trim */
+#define TRUEHD_ATMOS_TRIM_CUSTOM ((uint8_t)2)    /* the gains below (TS 103 448 pseudocode 17) */
+
+/** Trim configurations, indexed by TS 103 448 trim_cfg (table 7: 3 x heights + surrounds). */
+#define TRUEHD_ATMOS_TRIM_CONFIGS 9u
+
+typedef struct TrueHDAtmosTrim {
+    uint8_t mode;            /* TRUEHD_ATMOS_TRIM_* */
+    uint8_t reserved[3];
+    float centre_db;         /* custom trims: trim_centre, trim_surround, trim_height in dB; 0 if */
+    float surround_db;       /* not transmitted, and for the other modes */
+    float height_db;
+    float balance_top;       /* custom trims: bal3D_Y_tb and bal3D_Y_lis (TS 103 420 5.6.5.9-12), */
+    float balance_listener;  /* front/back balance in the top and bottom planes and in the
+                                listener plane: -1..1, negative towards the front; 0 if not
+                                transmitted (TS 103 448 does not say how to render it) */
+} TrueHDAtmosTrim;           /* 24 bytes */
 
 typedef struct TrueHDAtmosMetadata {
     uint32_t element_count;   /* == TrueHDAtmosBlock.channel_count; element i is channel i */
     uint32_t bed_count;       /* elements [0, bed_count) are bed channels (incl. LFE) */
     uint32_t isf_count;       /* then isf_count ISF objects */
     uint32_t dynamic_count;   /* then dynamic objects up to element_count */
-    int32_t warp_mode;        /* TRUEHD_ATMOS_WARP_*; the last value signalled since reset */
+    int32_t warp_mode;        /* TRUEHD_ATMOS_WARP_*: that of the latest update started at or before
+                                 this block's last frame (from the trim element of its payload) */
     uint32_t update_count;    /* updates starting inside this block (usually 0 or 1) */
     const TrueHDAtmosMetadataUpdate *updates;  /* update_count entries, ascending frame_offset */
     const TrueHDAtmosElement *elements;        /* element_count entries: the values of the latest
@@ -252,15 +302,24 @@ typedef struct TrueHDAtmosMetadata {
  * a lossless stream cannot be decoded at a lower rate. Every presentation of a stream has the
  * same rate. Atmos (presentation 3) is 48 kHz in all content tested; should a 96 kHz Atmos
  * stream appear, its blocks report 96000 Hz / 80 frames per access unit and all OAMD timing
- * (frame_offset, ramp_frames) is in frames at that rate.
+ * (frame_offset, ramp_frames) is in frames at that rate. A payload's own timing counts samples at a
+ * rate it does not state: TS 103 420 5.3 defines one frame of metadata as 1536 of them. At 48 or
+ * 44.1 kHz that is the stream's rate. At a multiple of it the decoder measures the interval
+ * between payloads, takes 1536 x rate / interval snapped to 1, 2 or 4 times the base rate, and
+ * converts to the stream's frames. A stream's first payload waits for its second, so at those
+ * rates the first metadata after create comes up to one payload interval later; reset() keeps
+ * what was measured, so a seek within the stream does not wait, and a different stream
+ * configuration (major sync) or rate measures again.
  *
  * INPUT TIMELINE: input_access_unit counts every access unit in the bytes pushed since
  * create()/reset(), in stream order, whether or not it was decoded: the ones skipped while
  * waiting for the first major sync, encoder duplicates, and ones that failed to decode all
  * count. input_frame_offset = input_access_unit * access_unit_frames is therefore the number
  * of input frames preceding this block's first frame. To place a block on the source
- * timeline after a seek: time = (pts of the first push after reset) +
- * input_frame_offset / sample_rate. This relies on the first push after create()/reset()
+ * timeline after a seek: time = pts + pts_au_index * access_unit_frames / sample_rate, from
+ * the latest timestamp pushed at or before the block (a push of a laced Matroska block carries
+ * none), so every block after the first timestamp is placed, also when that timestamp's own
+ * access units were skipped while waiting for a major sync. This relies on each timestamped push
  * starting at an access unit boundary, which demuxed packets (MKV, MP4, M2TS/FFmpeg) always
  * do. Counting is per access unit, not per push: an access unit split across several pushes is
  * counted once, attributed to the push holding its first byte; a trailing incomplete access
@@ -286,6 +345,24 @@ typedef struct TrueHDAtmosMetadata {
  * changes the roles (new serial) in the block where its first update starts.
  */
 
+/*
+ * SOURCE POSITION: TrueHD carries its own presentation clock. Every restart header (each
+ * substream's, at every major sync) states output_timing, the frame at which that access
+ * unit plays, modulo 2^16; each access unit after it plays access_unit_frames later, so a
+ * block's output_timing is exact from the first block after create()/reset(). A stream that
+ * sends hires_output_timing (one bit per access unit, completed some access units after a
+ * major sync) adds the high 16 bits: then output_position is the block's frame in 32 bits and
+ * TRUEHD_ATMOS_BLOCK_OUTPUT_POSITION is set. Without it, a container timestamp good to within
+ * 2^15 frames picks the 2^16-frame window exactly, so a Matroska millisecond becomes the exact
+ * frame. A splice or a different stream restarts the clock at its major sync.
+ *
+ * input_timing is the access unit header's other time: when its first byte enters the
+ * decoder's FIFO in the format's buffer model. It runs ahead of output_timing by a latency
+ * that varies with the data rate (measured from one access unit to over 70 ms within one
+ * stream), so it does not say where a block plays. The framer holds it to the format's bounds
+ * (see the framer) to reject damaged access units whose header parity happens to pass.
+ */
+
 /* TrueHDAtmosBlock.flags */
 /** First block after create/reset/set_presentation, or after data was dropped to resync. */
 #define TRUEHD_ATMOS_BLOCK_DISCONTINUITY 0x01u
@@ -297,6 +374,41 @@ typedef struct TrueHDAtmosMetadata {
 #define TRUEHD_ATMOS_BLOCK_METADATA_UPDATED 0x08u
 /** input_access_unit includes an estimate (see INPUT TIMELINE); sticky until reset(). */
 #define TRUEHD_ATMOS_BLOCK_INPUT_OFFSET_ESTIMATED 0x10u
+/** .output_position is known (see SOURCE POSITION). */
+#define TRUEHD_ATMOS_BLOCK_OUTPUT_POSITION 0x20u
+
+/*
+ * DYNAMIC RANGE CONTROL: the stream's DRC data as of a block's access unit, carried as data and
+ * applied by nothing in this library (the decode stays lossless). The Dolby TrueHD high level
+ * bitstream description gives the syntax only (4.2, 4.3, 4.5); the scales below are the ones the
+ * truehd crate checks the stream against, and which substream's state governs a presentation is
+ * not stated there.
+ */
+typedef struct TrueHDAtmosSubstreamDynamicRange {
+    uint32_t active;              /* 1: a drc_gain_update has arrived since decoding (re)started */
+    int32_t gain_update;          /* the latest drc_gain_update (s9), in 1/64 octave: gain
+                                     2^(gain_update / 64) */
+    uint32_t time_update;         /* its drc_time_update (u3): the next update is due within
+                                     2^time_update access units */
+    uint32_t count;               /* access units since that update */
+    uint32_t heavy_active;        /* 1: a heavy DRC update has arrived since decoding (re)started */
+    uint32_t heavy_present;       /* 1: the latest restart header carried a heavy DRC update */
+    int32_t heavy_gain_update;    /* the latest heavy_drc_gain_update (s9), in 1/32 octave */
+    uint32_t heavy_time_update;   /* its heavy_drc_time_update (u3), as time_update */
+    uint32_t heavy_count;         /* access units since that update */
+} TrueHDAtmosSubstreamDynamicRange;
+
+typedef struct TrueHDAtmosDynamicRange {
+    int32_t start_up_gain;        /* drc_start_up_gain (s7) of the latest major sync, in 1/16
+                                     octave */
+    int32_t heavy_start_up_gain;  /* the six bits the description reserves at the head of
+                                     channel_meaning, read as the heavy DRC start-up gain (s6) in
+                                     1/4 octave */
+    uint32_t control_enabled;     /* bit 0, 1, 2: 2ch_, 6ch_, 8ch_control_enabled */
+    uint32_t heavy_in_stream;     /* 1: major sync flags bit 13, the restart headers carry heavy DRC */
+    uint32_t substream_count;     /* entries of .substreams in use */
+    TrueHDAtmosSubstreamDynamicRange substreams[4];
+} TrueHDAtmosDynamicRange;
 
 typedef struct TrueHDAtmosBlock {
     uint32_t sample_rate;         /* Hz: 44100, 48000, 88200, 96000, 176400 or 192000 */
@@ -307,11 +419,13 @@ typedef struct TrueHDAtmosBlock {
     uint32_t flags;               /* TRUEHD_ATMOS_BLOCK_* */
     uint32_t access_unit_frames;  /* nominal frames per access unit: 40 at 44.1/48 kHz, 80 at
                                      88.2/96 kHz, 160 at 176.4/192 kHz */
-    int64_t pts;                  /* pts given to the push() whose bytes contained this access
-                                     unit's first byte, or TRUEHD_ATMOS_NO_PTS (also when more
-                                     than 65536 pushes were waiting unconsumed and later ones
-                                     with other pts values had to share a record) */
-    uint32_t pts_au_index;        /* access units that started earlier within that same push:
+    int64_t pts;                  /* the latest pts given to push() at or before this access
+                                     unit's first byte since create()/reset() (skipped access
+                                     units' pushes included), or TRUEHD_ATMOS_NO_PTS before any
+                                     (a push without one, or one of more than 65536 waiting
+                                     pushes that had to share a record with other pts values,
+                                     gives none) */
+    uint32_t pts_au_index;        /* access units since the first one that pts's push started:
                                      block time = pts + pts_au_index * access_unit_frames / rate */
     uint32_t layout_serial;       /* see LAYOUT above */
     uint64_t sample_position;     /* frames output since create()/reset(), before this block */
@@ -328,6 +442,14 @@ typedef struct TrueHDAtmosBlock {
     const float *const *bed_channels; /* bed_channel_count planes of frame_count floats, as
                                      .channels; NULL when bed_channel_count is 0 */
     const uint8_t *bed_speakers;  /* bed_channel_count TRUEHD_ATMOS_SPEAKER_* codes, or NULL */
+    uint32_t input_timing;        /* 0..65535: the access unit header's input_timing; see SOURCE
+                                     POSITION (a buffer time, not where the block plays) */
+    uint32_t output_timing;       /* 0..65535: where this block's first frame plays, in frames at
+                                     sample_rate, modulo 2^16; see SOURCE POSITION */
+    uint32_t output_position;     /* the same position in full 32 bits, with
+                                     TRUEHD_ATMOS_BLOCK_OUTPUT_POSITION; else 0 */
+    const TrueHDAtmosDynamicRange *dynamic_range; /* see DYNAMIC RANGE CONTROL; NULL for MLP FBB,
+                                     which carries none. Valid until the next call on the handle */
 } TrueHDAtmosBlock;
 
 /* ------------------------------------------------------------------------------------------ */
@@ -349,6 +471,12 @@ typedef struct TrueHDAtmosPresentationInfo {
     uint32_t channel_count;  /* 0 when absent */
     uint8_t speakers[TRUEHD_ATMOS_MAX_CHANNELS]; /* channel_count codes, then UNKNOWN; for an
                                                     object presentation: bed speakers, then OBJECT */
+    int32_t dialogue_level;  /* the presentation's average dialogue level in LKFS, -1 to -63, as its
+                                dialogue_norm states it at the latest major sync (Dolby TrueHD high
+                                level bitstream description 4.3, 4.4; the reserved value 0 reads as
+                                -31); 0 when absent, and for MLP FBB, which carries none. A decoder
+                                normalises the presentation's dialogue to -31 LKFS by applying
+                                -(dialogue_level + 31) dB */
 } TrueHDAtmosPresentationInfo;
 
 typedef struct TrueHDAtmosStreamInfo {
@@ -378,6 +506,8 @@ typedef struct TrueHDAtmosStats {
     uint64_t oamd_payloads;           /* OAMD payloads decoded */
     uint64_t oamd_errors;             /* OAMD payloads rejected (audio unaffected) */
     uint64_t metadata_updates;        /* updates delivered in blocks */
+    uint64_t oamd_offset_mismatches;  /* OAMD payloads whose EMDF smploffst differs from their own
+                                         sample_offset (timed by sample_offset) */
 } TrueHDAtmosStats;
 
 /* ------------------------------------------------------------------------------------------ */
@@ -472,6 +602,15 @@ TrueHDAtmosStatus truehd_atmos_decoder_pull(TrueHDAtmosDecoder *decoder, TrueHDA
  */
 TrueHDAtmosStatus truehd_atmos_decoder_get_stream_info(const TrueHDAtmosDecoder *decoder,
                                                        TrueHDAtmosStreamInfo *info);
+
+/**
+ * The trim configurations in force as of the block last pulled, timed like
+ * TrueHDAtmosMetadata.warp_mode: those of the latest update started at or before its last frame
+ * (every one TRUEHD_ATMOS_TRIM_DEFAULT until a trim element arrives). `trims` receives
+ * TRUEHD_ATMOS_TRIM_CONFIGS entries. Per-element trim bypass is TRUEHD_ATMOS_ELEMENT_TRIM_BYPASS.
+ */
+TrueHDAtmosStatus truehd_atmos_decoder_get_trims(const TrueHDAtmosDecoder *decoder,
+                                                 TrueHDAtmosTrim *trims);
 
 TrueHDAtmosStatus truehd_atmos_decoder_get_stats(const TrueHDAtmosDecoder *decoder,
                                                  TrueHDAtmosStats *stats);
