@@ -41,8 +41,7 @@ dependencies = [
 [[package]]
 name = "oamd"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76c4b9119cf66c5cdbc555ac0dbb9607a92a71e8fd6409c3217f429c05872f93"
+source = "git+https://github.com/TheFireKahuna/oamd?rev=594402e80997586a974097d082cd493de7a60a70#594402e80997586a974097d082cd493de7a60a70"
 dependencies = [
  "anyhow",
  "bitstream-io",
@@ -101,7 +100,7 @@ dependencies = [
 [[package]]
 name = "truehd"
 version = "0.7.2"
-source = "git+https://github.com/superuser404notfound/truehdd?rev=33bae1657ceb25b5fe0347f42c544c3414e2760e#33bae1657ceb25b5fe0347f42c544c3414e2760e"
+source = "git+https://github.com/TheFireKahuna/truehdd?rev=054fcae18cca12834083ad39ece26af23bf913c5#054fcae18cca12834083ad39ece26af23bf913c5"
 dependencies = [
  "anyhow",
  "bitstream-io",
@@ -115,6 +114,7 @@ name = "truehd-atmos-ffi"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "log",
  "truehd",
 ]
 

@@ -12,7 +12,7 @@ Atmos receiver as Dolby MAT and iOS renders as Spatial Audio.
 
 The decoding is the [`truehd`](https://github.com/truehdd/truehdd) crate (Apache-2.0), pinned to
 an exact commit. Until it is merged upstream that commit is in
-[a fork](https://github.com/superuser404notfound/truehdd/tree/perf/harletty-block-decode):
+[a fork](https://github.com/TheFireKahuna/truehdd/tree/054fcae18cca12834083ad39ece26af23bf913c5):
 upstream plus [harletty's](https://github.com/harletty/truehdd/tree/fix/huffman-tree-build-memory)
 speed work on the decoder, which includes [truehdd#42](https://github.com/truehdd/truehdd/pull/42)
 (byte-identical output, about half the decode time of the unmodified crate). This repository adds the C API, an access-unit framer that reports where each
@@ -26,7 +26,7 @@ the old product name.
 ## Use
 
 ```swift
-.package(url: "https://github.com/superuser404notfound/LibTrueHD", .upToNextMinor(from: "3.1.0")),
+.package(url: "https://github.com/TheFireKahuna/LibTrueHD", exact: "4.0.0-fire.1"),
 // target dependency:
 .product(name: "TrueHD", package: "LibTrueHD"),
 ```

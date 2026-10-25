@@ -75,7 +75,7 @@ pub struct Engine {
     bed_plane_ptrs: [*const f32; MAX_CHANNELS],
     bed_speakers: [u8; MAX_CHANNELS],
     objects: ObjectState,
-    oamd_bytes: Vec<(u64, Vec<u8>)>,
+    oamd_bytes: Vec<(Option<u64>, Vec<u8>)>,
 
     stats: Stats,
     last_error: CString,
@@ -332,6 +332,8 @@ impl Engine {
         let bed = stream::resolve(PRESENTATION_HIGHEST_CHANNEL_BASED, &desc.map);
         let configured_before = !self.sync_signature.is_empty();
         std::mem::swap(&mut self.sync_signature, &mut self.signature_scratch);
+        // Another stream configuration: what its payloads' interval said no longer holds.
+        self.objects.forget_timing();
         self.desc = Some(desc);
         if configured_before && !self.waiting_for_sync {
             // A configuration change mid-stream: start the new one cleanly at this access unit.
@@ -377,7 +379,7 @@ impl Engine {
         if let Some(evo) = au.extra_data.as_mut().and_then(|x| x.evo_frame.as_mut()) {
             for payload in evo.evo_payloads.iter_mut() {
                 if payload.evo_payload_id == OAMD_PAYLOAD_ID {
-                    let offset = payload.evo_payload_config.smploffst.unwrap_or(0) as u64;
+                    let offset = payload.evo_payload_config.smploffst.map(u64::from);
                     self.oamd_bytes
                         .push((offset, std::mem::take(&mut payload.evo_payload_byte)));
                     payload.evo_payload_id = 0;
@@ -446,10 +448,11 @@ impl Engine {
                 let (offset, bytes) = (*offset, bytes.as_slice());
                 let parsed =
                     catch_unwind(AssertUnwindSafe(|| ObjectAudioMetadataPayload::read(bytes)));
+                let mismatches = self.objects.offset_mismatches;
                 let result = match parsed {
                     Ok(Ok(payload)) => {
                         self.objects
-                            .ingest(&payload, self.sample_position, offset, channels)
+                            .ingest(&payload, self.sample_position, offset, channels, decoded.sampling_frequency)
                     }
                     Ok(Err(e)) => Err(format!("OAMD parse error: {e:#}")),
                     Err(p) => Err(format!("OAMD parser panicked: {}", panic_message(&p))),
@@ -458,6 +461,13 @@ impl Engine {
                     Ok(()) => {
                         self.stats.oamd_payloads += 1;
                         self.oamd_seen = true;
+                        if self.objects.offset_mismatches != mismatches {
+                            self.stats.oamd_offset_mismatches += 1;
+                            self.set_error(format!(
+                                "OAMD payload's EMDF smploffst ({}) differs from its sample_offset; timed by sample_offset",
+                                offset.unwrap_or(0)
+                            ));
+                        }
                     }
                     Err(message) => {
                         self.stats.oamd_errors += 1;
@@ -558,6 +568,10 @@ impl Engine {
             layout_serial: self.layout_serial,
             presentations: desc.presentations,
         })
+    }
+
+    pub fn trims(&self) -> [Trim; TRIM_CONFIGS] {
+        self.objects.trims()
     }
 
     pub fn stats(&self) -> Stats {

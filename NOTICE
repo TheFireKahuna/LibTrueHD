@@ -4,15 +4,18 @@ C API and Apple packaging of a Dolby TrueHD / Dolby Atmos decoder.
 This product includes software from the truehdd project
 (https://github.com/truehdd/truehdd): the `truehd` crate (TrueHD/MLP parser and decoder),
 Copyright Rainbaby and the truehdd contributors, licensed under the Apache License, Version 2.0.
-It is built from https://github.com/superuser404notfound/truehdd, commit
-33bae1657ceb25b5fe0347f42c544c3414e2760e: upstream commit
+It is built from https://github.com/TheFireKahuna/truehdd, commit
+054fcae18cca12834083ad39ece26af23bf913c5: upstream commit
 02d29cd0 with performance changes by harletty (https://github.com/harletty/truehdd,
 branch fix/huffman-tree-build-memory), which include the change submitted upstream as
-truehdd/truehdd#42, and a parser option and a build feature that discard matrix interpolation values.
+truehdd/truehdd#42, a parser option and a build feature that discard matrix interpolation values,
+and the Evolution (EMDF) container read as ETSI TS 102 366 Annex H specifies it.
 
 This product includes the `oamd` crate 0.1.0 (https://github.com/truehdd/oamd), the object
 audio metadata parser used by `truehd`, Copyright Rainbaby, licensed under the Apache License,
-Version 2.0.
+Version 2.0, as modified in https://github.com/TheFireKahuna/oamd, commit
+594402e80997586a974097d082cd493de7a60a70 (conformance to ETSI TS 103 420; its history lists the
+changes).
 
 The static library also contains, compiled in, the Rust standard library and these crates,
 each available under the MIT license or the Apache License, Version 2.0 (memchr: the MIT

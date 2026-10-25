@@ -18,8 +18,12 @@ fn main() {
             .to_owned()
     };
     let version = field("version");
-    let source = field("source");
-    let rev = source.rsplit('#').next().expect("truehd commit in Cargo.lock");
+    // A path override (a [patch] to a local checkout) has no source line, and no commit to name.
+    let source = entry.lines().any(|l| l.trim_start().starts_with("source = ")).then(|| field("source"));
+    let rev = source.as_deref().map_or("local", |s| {
+        let rev = s.rsplit('#').next().expect("truehd commit in Cargo.lock");
+        &rev[..12]
+    });
     println!("cargo:rustc-env=TRUEHD_CRATE_VERSION={version}");
-    println!("cargo:rustc-env=TRUEHD_CRATE_COMMIT={}", &rev[..12]);
+    println!("cargo:rustc-env=TRUEHD_CRATE_COMMIT={rev}");
 }

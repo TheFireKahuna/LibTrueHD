@@ -203,7 +203,10 @@ fn damaged_input_is_survived() {
     for round in 0..6 {
         let mut damaged = data.clone();
         // Bit flips, zeroed runs and inserted garbage, spread over the stream.
-        let flips = [20usize, 200, 2000, 50, 5, 500][round];
+        // Counts sized for the Unfold sample (21 MB); the fixture it falls back to without the
+        // samples is 0.3 s, and takes damage in proportion.
+        let scale = (data.len() as f64 / 21e6).min(1.0);
+        let flips = (([20usize, 200, 2000, 50, 5, 500][round] as f64 * scale).round() as usize).max(1);
         for _ in 0..flips {
             let at = (rand() as usize) % damaged.len();
             match rand() % 3 {

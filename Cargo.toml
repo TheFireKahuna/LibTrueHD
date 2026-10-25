@@ -18,9 +18,14 @@ crate-type = ["staticlib", "rlib"]
 # The fork branch is harletty's speed work on truehd (upstream main 02d29cd plus 17 commits,
 # the change from truehdd/truehdd#42 among them): blocks decoded in place, table-driven Huffman,
 # vectorised prediction filters, whole-block matrices. Byte-identical output, about a third less
-# decode time than #42 alone; back to upstream once it is merged. On top of it: the parser
-# option and feature that discard matrix interpolation values (branch feat/ignore-interpolation).
-truehd = { git = "https://github.com/superuser404notfound/truehdd", rev = "33bae1657ceb25b5fe0347f42c544c3414e2760e", default-features = false }
+# decode time than #42 alone; back to upstream once it is merged. On top of it, on branch
+# feat/ignore-interpolation: the parser option and feature that discard matrix interpolation
+# values, and the Evolution (EMDF) container read as ETSI TS 102 366 Annex H has it.
+truehd = { git = "https://github.com/TheFireKahuna/truehdd", rev = "054fcae18cca12834083ad39ece26af23bf913c5", default-features = false }
+
+# The OAMD parser, patched against ETSI TS 103 420 (its history says what changed).
+[patch.crates-io]
+oamd = { git = "https://github.com/TheFireKahuna/oamd", rev = "594402e80997586a974097d082cd493de7a60a70" }
 
 [features]
 # On by default: the exact decode, matrix interpolation included. Built without it
@@ -45,4 +50,5 @@ incremental = false
 opt-level = 2
 
 [dev-dependencies]
+log = "0.4"
 anyhow = "1.0"

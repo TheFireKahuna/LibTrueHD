@@ -3,7 +3,7 @@
 
 use std::mem::{offset_of, size_of};
 
-pub const API_VERSION: u32 = 2;
+pub const API_VERSION: u32 = 3;
 pub const MAX_CHANNELS: usize = 16;
 pub const MAX_BLOCK_FRAMES: usize = 160;
 pub const NO_PTS: i64 = i64::MIN;
@@ -42,6 +42,12 @@ pub const EL_HEAD_TRACK_DISABLE: u32 = 1 << 8;
 
 pub const WARP_NOT_SIGNALLED: i32 = -1;
 
+/// TS 103 448 trim configurations (table 7), indexed by trim_cfg.
+pub const TRIM_CONFIGS: usize = 9;
+pub const TRIM_DEFAULT: u8 = 0;
+pub const TRIM_DISABLED: u8 = 1;
+pub const TRIM_CUSTOM: u8 = 2;
+
 pub const BLOCK_DISCONTINUITY: u32 = 1 << 0;
 pub const BLOCK_LAYOUT_CHANGED: u32 = 1 << 1;
 pub const BLOCK_HAS_METADATA: u32 = 1 << 2;
@@ -74,7 +80,9 @@ pub struct Element {
     pub screen_factor: f32,
     pub depth_factor: f32,
     pub dialog: u8,
-    pub reserved: [u8; 3],
+    /// The five bits that come with dialog indication 3, or 255.
+    pub dialog_extra: u8,
+    pub reserved: [u8; 2],
 }
 
 impl Element {
@@ -94,7 +102,8 @@ impl Element {
         screen_factor: 0.0,
         depth_factor: 0.0,
         dialog: 255,
-        reserved: [0; 3],
+        dialog_extra: 255,
+        reserved: [0; 2],
     };
 
     /// Equal in everything a renderer acts on, ignoring the CHANGED marker itself.
@@ -107,12 +116,43 @@ impl Element {
     }
 }
 
+/// One trim configuration's trim mode and, for a custom trim, its gains in dB.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Trim {
+    pub mode: u8,
+    pub reserved: [u8; 3],
+    pub centre_db: f32,
+    pub surround_db: f32,
+    pub height_db: f32,
+    /// bal3D_Y_tb and bal3D_Y_lis (TS 103 420 5.6.5.9-12): -1..1, front (negative) to back.
+    pub balance_top: f32,
+    pub balance_listener: f32,
+}
+
+impl Trim {
+    pub const DEFAULT: Self = Self {
+        mode: TRIM_DEFAULT,
+        reserved: [0; 3],
+        centre_db: 0.0,
+        surround_db: 0.0,
+        height_db: 0.0,
+        balance_top: 0.0,
+        balance_listener: 0.0,
+    };
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct MetadataUpdate {
     pub frame_offset: u32,
     pub ramp_frames: u32,
     pub elements: *const Element,
+    /// TRIM_CONFIGS entries: the trims in force for this update.
+    pub trims: *const Trim,
+    /// The warp mode in force for this update.
+    pub warp_mode: i32,
+    pub reserved: u32,
 }
 
 #[repr(C)]
@@ -199,6 +239,7 @@ pub struct Stats {
     pub oamd_payloads: u64,
     pub oamd_errors: u64,
     pub metadata_updates: u64,
+    pub oamd_offset_mismatches: u64,
 }
 
 // Layout checks against the header (arm64 and x86_64 Apple ABIs, 8-byte pointers).
@@ -210,7 +251,8 @@ const _: () = {
     assert!(offset_of!(Element, size) == 28);
     assert!(offset_of!(Element, divergence) == 40);
     assert!(offset_of!(Element, dialog) == 60);
-    assert!(size_of::<MetadataUpdate>() == 16);
+    assert!(size_of::<MetadataUpdate>() == 32);
+    assert!(size_of::<Trim>() == 24);
     assert!(size_of::<Metadata>() == 40);
     assert!(offset_of!(Metadata, updates) == 24);
     assert!(size_of::<Block>() == 112);
@@ -224,5 +266,5 @@ const _: () = {
     assert!(offset_of!(Block, bed_speakers) == 104);
     assert!(size_of::<PresentationInfo>() == 28);
     assert!(size_of::<StreamInfo>() == 36 + 4 * 28);
-    assert!(size_of::<Stats>() == 12 * 8);
+    assert!(size_of::<Stats>() == 13 * 8);
 };

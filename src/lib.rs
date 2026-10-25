@@ -247,6 +247,29 @@ pub unsafe extern "C" fn truehd_atmos_decoder_get_stream_info(
 }
 
 /// # Safety
+/// `decoder` is NULL or a live handle; `trims` is NULL or writable for TRIM_CONFIGS entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn truehd_atmos_decoder_get_trims(
+    decoder: *const TrueHDAtmosDecoder,
+    trims: *mut Trim,
+) -> Status {
+    let Some(engine) = engine_ref(decoder) else {
+        return ERR_NULL;
+    };
+    if trims.is_null() {
+        return ERR_NULL;
+    }
+    match catch_unwind(AssertUnwindSafe(|| engine.trims())) {
+        Ok(t) => {
+            // SAFETY: the caller provides TRIM_CONFIGS writable entries.
+            unsafe { std::ptr::copy_nonoverlapping(t.as_ptr(), trims, TRIM_CONFIGS) };
+            OK
+        }
+        Err(_) => ERR_PANIC,
+    }
+}
+
+/// # Safety
 /// `decoder` is NULL or a live handle; `stats` is NULL or writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn truehd_atmos_decoder_get_stats(
